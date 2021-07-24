@@ -60,3 +60,36 @@ def get_common_docker_args(
     return f"-v {oneflow_src_dir}:{oneflow_src_dir} {proxy_env_arg} {pwd_arg} {cambricon_arg} {house_dir_arg} {cache_dir_arg} {build_dir_arg} -w {current_dir} --shm-size=8g"  ## 新添加的 cambricon
 ```
 [修改细节多，详见](https://github.com/Oneflow-Inc/oneflow_cambricon/pull/17/files#diff-f421848746ad2a399bbe49e938fd01f333b9b1202a5cbca55fb5ead90d5571fd)
+
+6. oneflow/api/python/env/env.h
+```.h
+#ifdef WITH_CAMBRICON
+#include "cnrt.h"
+#endif
+```
+
+7. oneflow/core/actor/actor.cpp
+```.cpp
+#include "oneflow/core/device/cambricon_device_context.h"
+#include "oneflow/core/device/fake_device_device_context.h"
+```
+
+8. oneflow/core/actor/copy_hd_actor.cpp
+```.cpp
+#if defined(WITH_CUDA) or defined(WITH_FAKE_DEVICE) or defined(WITH_CAMBRICON)
+```
+
+9. oneflow/core/common/device_type.proto
+```.proto
+enum DeviceType {
+  kInvalidDevice = 0;
+  kCPU = 1;
+  kGPU = 2;
+  kFAKEDEVICE = 3;
+  kCambricon = 4;
+}
+```
+
+10.  oneflow/core/common/id_util.h
+```.h
+```
