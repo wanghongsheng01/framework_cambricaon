@@ -92,4 +92,66 @@ enum DeviceType {
 
 10.  oneflow/core/common/id_util.h
 ```.h
+class MemZoneId {
+ public:
+  using device_index_t = uint32_t;
+
+  constexpr static size_t kDeviceTypeBits = 5;
+  constexpr static size_t kDeviceIndexBits = 7;
+  constexpr static size_t kMaxDeviceTypeVal = (size_t{1} << kDeviceTypeBits) - size_t{1};
+  constexpr static device_index_t kMaxDeviceIndex =
+      (device_index_t{1} << kDeviceIndexBits) - device_index_t{1};
+
+  MemZoneId() {
+    device_type_ = DeviceType::kCPU;
+    device_index_ = 0;
+  }
+  MemZoneId(DeviceType device_type, device_index_t device_index)
+      : device_type_(device_type), device_index_(device_index) {
+    CHECK_LE(static_cast<size_t>(device_type), kMaxDeviceTypeVal);
+    CHECK_LE(device_index, kMaxDeviceIndex);
+  }
+  DeviceType device_type() const { return device_type_; }
+  device_index_t device_index() const { return device_index_; }
+  bool operator==(const MemZoneId& rhs) const {
+    return device_type_ == rhs.device_type_ && device_index_ == rhs.device_index_;
+  }
+  bool operator!=(const MemZoneId& rhs) const { return !(*this == rhs); }
+  size_t hash() const {
+    size_t hash = std::hash<size_t>{}(static_cast<size_t>(device_type_));
+    HashCombine(&hash, std::hash<device_index_t>{}(device_index_));
+    return hash;
+  }
+
+ private:
+  DeviceType device_type_;
+  device_index_t device_index_;
+};
 ```
+
+```.h
+template<>
+struct hash<oneflow::MemZoneId> {
+  size_t operator()(const oneflow::MemZoneId& mem_zone_id) const { return mem_zone_id.hash(); }
+};
+
+```
+
+11. oneflow/core/device/cambricon_device_context.h
+12. oneflow/core/device/cambricon_device_context.cpp
+13. 
+14. oneflow/core/device/cambricon_device_stream_index.h
+15. oneflow/core/device/cambricon_device_stream_index.cpp
+16. 
+17. oneflow/core/device/cambricon_queue_handle.h 
+18. oneflow/core/device/cambricon_queue_handle.cpp
+19. 
+20. oneflow/core/device/device_context.h
+21. 
+22. oneflow/core/device/fake_device_device_context.h
+23. oneflow/core/device/fake_device_device_context.cpp
+24. 
+25. oneflow/core/device/fake_device_stream_index.h
+26. oneflow/core/device/fake_device_stream_index.cpp
+27. 
+28. 
