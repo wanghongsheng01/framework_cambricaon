@@ -138,12 +138,114 @@ struct hash<oneflow::MemZoneId> {
 ```
 
 11. oneflow/core/device/cambricon_device_context.h
+```.h
+#ifndef ONEFLOW_CORE_DEVICE_CAMBRICON_DEVICE_CONTEXT_H_
+#define ONEFLOW_CORE_DEVICE_CAMBRICON_DEVICE_CONTEXT_H_
+
+#include "oneflow/core/kernel/kernel_context.h"
+#include "oneflow/core/device/device_context.h"
+#include "oneflow/core/device/cambricon_queue_handle.h"
+
+namespace oneflow {
+
+#ifdef WITH_CAMBRICON
+
+class CambriconDeviceCtx : public DeviceCtx {
+ public:
+  OF_DISALLOW_COPY_AND_MOVE(CambriconDeviceCtx);
+  CambriconDeviceCtx() = delete;
+  ~CambriconDeviceCtx() override = default;
+
+  explicit CambriconDeviceCtx(CambriconQueueHandle* queue_handler)
+      : cambricon_handler_(queue_handler) {}
+
+  const cnrtQueue_t& cambricon_queue() const override {
+    return *(cambricon_handler_->cambricon_queue());
+  }
+
+  const cnnlHandle_t& cambricon_handle() const override {
+    return *(cambricon_handler_->cambricon_handle());
+  }
+
+  void SyncDevice() override { CNRT_CHECK(cnrtSyncQueue(cambricon_queue())); }
+
+  void AddCallBack(std::function<void()> callback) const override {
+    cambricon_handler_->AddCallBack(callback);
+  }
+
+ protected:
+  CambriconQueueHandle* cambricon_handler_;
+};
+
+#endif  // WITH_CAMBRICON
+
+}  // namespace oneflow
+
+#endif  // ONEFLOW_CORE_DEVICE_CAMBRICON_DEVICE_CONTEXT_H_
+```
 12. oneflow/core/device/cambricon_device_context.cpp
+```.cpp
+#include "oneflow/core/device/cambricon_device_context.h"
+#include "oneflow/core/thread/thread_context.h"
+
+namespace oneflow {
+
+#ifdef WITH_CAMBRICON
+
+REGISTER_DEVICE_CONTEXT(DeviceType::kCambricon, ([](const ThreadCtx& thread_ctx) -> DeviceCtx* {
+                          CambriconQueueHandle* cambricon_queue = nullptr;
+                          cambricon_queue = thread_ctx.g_cambricon_queue.get();
+                          return new CambriconDeviceCtx(cambricon_queue);
+                        }));
+
+#endif  // WITH_CAMBRICON
+
+}  // namespace oneflow
+```
 
 13. oneflow/core/device/cambricon_device_stream_index.h
+```.h
+#ifndef ONEFLOW_CORE_DEVICE_CAMBRICON_DEVICE_STREAM_INDEX_H_
+#define ONEFLOW_CORE_DEVICE_CAMBRICON_DEVICE_STREAM_INDEX_H_
+
+#ifdef WITH_CAMBRICON
+#include "oneflow/core/device/stream_index.h"
+#include "oneflow/core/graph/task_node.h"
+
+namespace oneflow {
+
+class CAMBRICONDeviceStreamIndexGenerator final : public StreamIndexGenerator {
+ public:
+  CAMBRICONDeviceStreamIndexGenerator() = default;
+  OF_DISALLOW_COPY_AND_MOVE(CAMBRICONDeviceStreamIndexGenerator);
+  ~CAMBRICONDeviceStreamIndexGenerator() = default;
+
+  stream_index_t GenerateComputeStreamIndex() override { return 0; }
+  stream_index_t GenerateH2DStreamIndex() override { return 1; }
+  stream_index_t GenerateD2HStreamIndex() override { return 2; }
+};
+
+}  // namespace oneflow
+
+#endif  // WITH_CAMBRICON
+
+#endif  // ONEFLOW_CORE_DEVICE_CAMBRICON_DEVICE_STREAM_INDEX_H_
+```
 14. oneflow/core/device/cambricon_device_stream_index.cpp
+```.cpp
+#ifdef WITH_CAMBRICON
+#include "oneflow/core/device/cambricon_device_stream_index.h"
+
+namespace oneflow {
+REGISTER_STREAM_INDEX_GENERATOR(DeviceType::kCambricon, CAMBRICONDeviceStreamIndexGenerator);
+}
+#endif  // WITH_CAMBRICON
+```
 
 15. oneflow/core/device/cambricon_queue_handle.h 
+```.h
+
+```
 16. oneflow/core/device/cambricon_queue_handle.cpp
  
 17. oneflow/core/device/device_context.h
