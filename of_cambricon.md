@@ -3431,62 +3431,1699 @@ REGISTER_DEVICE_THREAD_CREATOR_WITH_STREAM_ID(DeviceType::kFAKEDEVICE,
 
 
 76. oneflow/python/experimental/interface_op_read_and_write.py 
+```.py
+def GetEagerInterfaceBlob(op_name):
+    flow.sync_default_session()
+    sess = session_ctx.GetDefaultSession()
+
+    def CreateBlob():
+```
 
 77. oneflow/python/framework/config_util.py 
+```.py
+@oneflow_export("config.mlu_device_num")
+def api_mlu_device_num(val: int) -> None:
+    r"""Set number of MLUs on each machine to run oneflow on. Usually you don't need to set this.
+    Args:
+        val (int): number of MLUs. It is identical on every machine.
+    """
+    return enable_if.unique([mlu_device_num, do_nothing])(val)
+
+
+@enable_if.condition(hob.in_normal_mode & ~hob.session_initialized)
+def mlu_device_num(val):
+    sess = session_ctx.GetDefaultSession()
+    assert type(val) is int
+    sess.config_proto.resource.mlu_device_num = val
+```
 
 78. oneflow/python/framework/device.py 
+```.py
+import oneflow.core.common.device_type_pb2 as device_type_pb
+from oneflow.python.oneflow_export import oneflow_export
+
+
+_device_tag_2_device_type = {
+    "cpu": device_type_pb.kCPU,
+    "gpu": device_type_pb.kGPU,
+    "dummy": device_type_pb.kFAKEDEVICE,
+    "cambricon": device_type_pb.kCambricon,
+}
+
+
+_device_type_2_device_tag = {
+    device_type_pb.kCPU: "cpu",
+    device_type_pb.kGPU: "gpu",
+    device_type_pb.kFAKEDEVICE: "dummy",
+    device_type_pb.kCambricon: "cambricon",
+}
+
+
+@oneflow_export("is_valid_device_tag")
+def is_valid_device_tag(device_tag: str):
+    if not isinstance(device_tag, str):
+        return False
+    return device_tag in _device_tag_2_device_type
+```
 
 79. oneflow/python/framework/placement_context.py
+```.py
+def GetMluMachineDeviceIds(resource):
+    assert resource.machine_num > 0
+    assert resource.HasField("mlu_device_num")
+    return [
+        "{}:0-{}".format(m_id, resource.mlu_device_num - 1)
+        for m_id in range(resource.machine_num)
+    ]
+```
 
 80. oneflow/python/framework/placement_util.py
+```.py
+elif resource.HasField("mlu_device_num"):
+        return "cambricon", placement_ctx.GetMluMachineDeviceIds(resource)
+```
 
 81. oneflow/python/framework/session_util.py
+```.py
+def _GetDefaultConfigProto():
+    config_proto = job_set_util.ConfigProto()
+    config_proto.resource.machine_num = 0
+    if oneflow._oneflow_internal.flags.with_cuda():
+        config_proto.resource.gpu_device_num = 1
+    else:
+        config_proto.resource.cpu_device_num = 1
+        config_proto.resource.gpu_device_num = 0
+    config_proto.io_conf.SetInParent()
+    config_proto.session_id = session_ctx.GetDefaultSession().id
+    return config_proto
+```
 
 82. oneflow/python/ops/layers.py 
+```.py
+data_format = data_format.upper()
+
+    if data_format != "NCHW" and data_format != "NHWC":
+        raise ValueError('data_format must be "NHWC" or "NCHW".')
+
+    need_transpose = 0
+    if flow.current_scope().device_parallel_desc_symbol.device_tag == "cambricon":
+        if data_format == "NCHW":
+            need_transpose = 1
+        data_format = "channels_last"
+    else:
+        if data_format == "NHWC":
+            need_transpose = 1
+        data_format = "channels_first"
+
+    if need_transpose:
+        x = flow.transpose(x, perm=[0, 3, 1, 2])
+	@@ -1543,7 +1551,7 @@ def upsample_Job(x: tp.Numpy.Placeholder((1, 32, 32, 32))
+        .Output("y")
+        .Attr("height_scale", float(height_scale))
+        .Attr("width_scale", float(width_scale))
+        .Attr("data_format", data_format)
+        .Attr("interpolation", interpolation)
+        .Build()
+    )
+```
 
 83. oneflow/python/ops/nn_ops.py
+```.py
+if flow.current_scope().device_parallel_desc_symbol.device_tag == "cambricon":
+	channel = x.shape[3]
+	gamma = flow.get_variable(
+			name + "_gamma",
+			shape=(channel,),
+			dtype=x.dtype,
+			initializer=flow.ones_initializer(),
+			trainable=False,
+	)
+	beta = flow.get_variable(
+			name + "_beta",
+			shape=(channel,),
+			dtype=x.dtype,
+			initializer=flow.zeros_initializer(),
+			trainable=False,
+	)
+	out, mean, var = (
+			flow.user_op_builder(name)
+			.Op("instance_norm_2d")
+			.Input("in", [x])
+			.Input("gamma", [gamma])
+			.Input("beta", [beta])
+			.Output("out")
+			.Output("mean")
+			.Output("var")
+			.Attr("eps", eps)
+			.Build()
+			.InferAndTryRun()
+			.RemoteBlobList()
+	)
+	return out, mean, var
+```
 
 84. oneflow/python/serving/inference_session.py 
+```.py
+def _make_config_proto(self):
+	if self.config_proto_ is None:
+			self.config_proto_ = session_util._GetDefaultConfigProto()
+			self.config_proto_.resource.ClearField("cpu_device_num")
+			self.config_proto_.resource.ClearField("gpu_device_num")
+			self.config_proto_.resource.ClearField("mlu_device_num")
+
+	if self.option_.device_tag == "cpu":
+			self.config_proto_.resource.cpu_device_num = self.option_.device_num
+	elif self.option_.device_tag == "gpu":
+			self.config_proto_.resource.gpu_device_num = self.option_.device_num
+	elif self.option_.device_tag == "cambricon":
+			self.config_proto_.resource.mlu_device_num = self.option_.device_num
+	else:
+			raise NotImplementedError(
+					"not supported device tag {}".format(self.option_.device_tag)
+	@@ -291,6 +295,7 @@ def compile(self, op_list):
+									op_conf.name, op_conf.device_tag, device_tag
+							)
+					)
+					op_conf.device_tag = device_tag
+
+			compile_ctx.CurJobAddOp(op_conf)
+```
 
 85. oneflow/python/serving/saved_model_builder.py
+```.py
+# flow.checkpoint.save(checkpoint_path)
+        # using old api to save checkpoint for temporarily because eager api don't support new device type
+        check_point = flow.train.CheckPoint()
+        check_point.save(checkpoint_path)
+```
 
 86. oneflow/python/test/models/insightface/fresnet100.py
+```.py
+import oneflow as flow
+
+def _get_initializer():
+    return flow.random_normal_initializer(mean=0.0, stddev=0.1)
+
+def _get_regularizer(name):
+    return None
+
+def _prelu(inputs, data_format="NCHW", name=None):
+    return flow.layers.prelu(
+        inputs,
+        alpha_initializer=flow.constant_initializer(0.25),
+        alpha_regularizer=_get_regularizer("alpha"),
+        shared_axes=[2, 3] if data_format == "NCHW" else [1, 2],
+        name=name,
+    )
+
+
+def _batch_norm(
+    inputs,
+    epsilon,
+    center=True,
+    scale=True,
+    is_training=True,
+    data_format="NCHW",
+    name=None,
+):
+    return flow.layers.batch_normalization(
+        inputs=inputs,
+        axis=3 if data_format == "NHWC" and len(inputs.shape) == 4 else 1,
+        momentum=0.9,
+        epsilon=epsilon,
+        center=center,
+        scale=scale,
+        beta_initializer=flow.zeros_initializer(),
+        gamma_initializer=flow.ones_initializer(),
+        beta_regularizer=None,
+        gamma_regularizer=None,
+        moving_mean_initializer=flow.zeros_initializer(),
+        moving_variance_initializer=flow.ones_initializer(),
+        trainable=is_training,
+        training=is_training,
+        name=name,
+    )
+
+def _conv2d_layer(
+    name,
+    input,
+    filters,
+    kernel_size=3,
+    strides=1,
+    padding="SAME",
+    group_num=1,
+    data_format="NCHW",
+    dilation_rate=1,
+    activation=None,
+    use_bias=False,
+    weight_initializer=_get_initializer(),
+    bias_initializer=flow.zeros_initializer(),
+    weight_regularizer=_get_regularizer("weight"),
+    bias_regularizer=_get_regularizer("bias"),
+):
+    return flow.layers.conv2d(inputs=input, filters=filters, kernel_size=kernel_size, strides=strides, padding=padding, data_format=data_format, dilation_rate=dilation_rate, groups=group_num, activation=activation, use_bias=use_bias, kernel_initializer=weight_initializer, bias_initializer=bias_initializer, kernel_regularizer=weight_regularizer, bias_regularizer=bias_regularizer, name=name)
+
+def residual_unit_v3(
+    in_data, num_filter, stride, dim_match, bn_is_training, data_format, name
+):
+
+    suffix = ""
+    use_se = 0
+    bn1 = _batch_norm(
+        in_data,
+        epsilon=2e-5,
+        is_training=bn_is_training,
+        data_format=data_format,
+        name="%s%s_bn1" % (name, suffix),
+    )
+    conv1 = _conv2d_layer(
+        name="%s%s_conv1" % (name, suffix),
+        input=bn1,
+        filters=num_filter,
+        kernel_size=3,
+        strides=[1, 1],
+        padding="same",
+        data_format=data_format,
+        use_bias=False,
+        dilation_rate=1,
+        activation=None,
+    )
+    bn2 = _batch_norm(
+        conv1,
+        epsilon=2e-5,
+        is_training=bn_is_training,
+        data_format=data_format,
+        name="%s%s_bn2" % (name, suffix),
+    )
+    prelu = _prelu(bn2, data_format=data_format, name="%s%s_relu1" % (name, suffix))
+    conv2 = _conv2d_layer(
+        name="%s%s_conv2" % (name, suffix),
+        input=prelu,
+        filters=num_filter,
+        kernel_size=3,
+        strides=stride,
+        padding="same",
+        data_format=data_format,
+        use_bias=False,
+        dilation_rate=1,
+        activation=None,
+    )
+    bn3 = _batch_norm(
+        conv2,
+        epsilon=2e-5,
+        is_training=bn_is_training,
+        data_format=data_format,
+        name="%s%s_bn3" % (name, suffix),
+    )
+
+    if dim_match:
+        input_blob = in_data
+    else:
+        input_blob = _conv2d_layer(
+            name="%s%s_conv1sc" % (name, suffix),
+            input=in_data,
+            filters=num_filter,
+            kernel_size=1,
+            strides=stride,
+            padding="valid",
+            data_format=data_format,
+            use_bias=False,
+            dilation_rate=1,
+            activation=None,
+        )
+        input_blob = _batch_norm(
+            input_blob,
+            epsilon=2e-5,
+            is_training=bn_is_training,
+            data_format=data_format,
+            name="%s%s_sc" % (name, suffix),
+        )
+
+    identity = flow.math.add(x=bn3, y=input_blob)
+    return identity
+
+
+def get_symbol(input_blob):
+    filter_list = [64, 64, 128, 256, 512]
+    num_stages = 4
+    units = [3, 13, 30, 3]
+    num_classes = 512
+    bn_is_training = False
+    data_format = "NHWC"
+    if data_format.upper() == "NCHW":
+        input_blob = flow.transpose(
+        input_blob, name="transpose", perm=[0, 3, 1, 2]
+    )
+    input_blob = _conv2d_layer(
+        name="conv0",
+        input=input_blob,
+        filters=filter_list[0],
+        kernel_size=3,
+        strides=[1, 1],
+        padding="same",
+        data_format=data_format,
+        use_bias=False,
+        dilation_rate=1,
+        activation=None,
+    )
+    input_blob = _batch_norm(
+        input_blob, epsilon=2e-5, is_training=bn_is_training, data_format=data_format, name="bn0"
+    )
+    input_blob = _prelu(input_blob, data_format=data_format, name="relu0")
+
+    for i in range(num_stages):
+        input_blob = residual_unit_v3(
+            input_blob,
+            filter_list[i + 1],
+            [2, 2],
+            False,
+            bn_is_training=bn_is_training,
+            data_format=data_format,
+            name="stage%d_unit%d" % (i + 1, 1),
+        )
+        for j in range(units[i] - 1):
+            input_blob = residual_unit_v3(
+                input_blob,
+                filter_list[i + 1],
+                [1, 1],
+                True,
+                bn_is_training=bn_is_training,
+                data_format=data_format,
+                name="stage%d_unit%d" % (i + 1, j + 2),
+            )
+    body = _batch_norm(
+            input_blob,
+            epsilon=2e-5,
+            is_training=False,
+            data_format="NHWC",
+            name="bn1"
+    )
+    body = flow.reshape(body, (body.shape[0], -1))
+    pre_fc1 = flow.layers.dense(
+            inputs=body,
+            units=num_classes,
+            activation=None,
+            use_bias=True,
+            kernel_initializer=_get_initializer(),
+            bias_initializer=flow.zeros_initializer(),
+            kernel_regularizer=None,
+            bias_regularizer=None,
+            trainable=True,
+            name="pre_fc1",
+    )
+    fc1 = _batch_norm(
+            pre_fc1,
+            epsilon=2e-5,
+            scale=True,
+            center=True,
+            is_training=False,
+            data_format="NHWC",
+            name="fc1",
+    )
+    return fc1
+
+```
 
 87. oneflow/python/test/models/insightface/insightface_val.py
+```.py
+import math
+import os
+import argparse
+import numpy as np
+import cv2
+import oneflow as flow
+
+import fresnet100
+import oneflow.typing as tp
+from typing import Tuple
+from scipy.spatial import distance
+
+def get_val_args():
+    val_parser = argparse.ArgumentParser(description="flags for validation")
+    val_parser.add_argument(
+            "--val_img_dir",
+            type=str,
+            default="./woman.jpeg",
+            help="validation dataset dir",
+        )
+
+    # distribution config
+    val_parser.add_argument(
+        "--device_num_per_node",
+        type=int,
+        default=1,
+        required=False,
+    )
+    val_parser.add_argument(
+        "--num_nodes",
+        type=int,
+        default=1,
+        help="node/machine number for training",
+    )
+
+    val_parser.add_argument(
+        "--val_batch_size",
+        default=1,
+        type=int,
+        help="validation batch size totally",
+    )
+    # model and log
+    val_parser.add_argument(
+        "--log_dir", type=str, default="./log", help="log info save"
+    )
+    val_parser.add_argument(
+        "--model_load_dir", default="/insightface_nhwc", help="path to load model."
+    )
+    return val_parser.parse_args()
+
+
+def load_image(image_path):
+    im = cv2.imread(image_path)
+    dsize = (112, 112)
+    rgb_mean = [127.5, 127.5, 127.5]
+    std_values = [128.0, 128.0, 128.0]
+
+    im = cv2.resize(im, dsize, interpolation = cv2.INTER_AREA)
+    im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
+    im = (im - rgb_mean) / std_values
+    im = np.transpose(im, (2, 0, 1))
+    im = np.expand_dims(im, axis=0)
+    im = np.transpose(im, (0, 2, 3, 1))
+    print("image size: ", im.shape)
+    return np.ascontiguousarray(im, 'float32')
+
+def get_cambricon_config():
+    val_config = flow.function_config()
+    val_config.default_logical_view(flow.scope.consistent_view())
+    val_config.default_data_type(flow.float)
+    val_config.default_placement_scope(flow.scope.placement("cambricon", "0:0"))
+    return val_config
+
+def validation_job(images, config):
+    @flow.global_function(type="predict", function_config=config)
+    def get_symbol_val_job(
+            images: flow.typing.Numpy.Placeholder(
+                (1, 112, 112, 3)
+            )
+        ):
+        print("val batch data: ", images.shape)
+        embedding = fresnet100.get_symbol(images)
+        return embedding
+
+    return get_symbol_val_job
+
+def do_validation(images, val_job, name_suffix):
+    print("Validation starts...")
+    batch_size = 1
+    total_images_num = 1
+
+    _em = val_job(images).get()
+    return _em
+
+
+def load_checkpoint(model_load_dir):
+    print("=" * 20 + " model load begin " + "=" * 20)
+    flow.train.CheckPoint().load(model_load_dir)
+    print("=" * 20 + " model load end " + "=" * 20)
+
+
+def main():
+    args = get_val_args()
+    flow.env.init()
+    flow.env.log_dir(args.log_dir)
+    # validation
+    print("args: ", args)
+    output_list = [] 
+    if os.path.exists(args.val_img_dir):
+        print("=" * 20 + " image load begin " + "=" * 20)
+        images = load_image(args.val_img_dir)
+        print("=" * 20 + " image load end " + "=" * 20)
+    else: 
+        raise ValueError ("Image path for validation does NOT exist!")
+    flow.config.enable_legacy_model_io(True)
+    val_job = validation_job(images, get_cambricon_config())
+    load_checkpoint(args.model_load_dir)
+    print("=" * 20 + " Prediction begins " + "=" * 20)   
+    mlu_res = do_validation(images, val_job, "mlu")
+    print("=" * 20 + " Prediction ends " + "=" * 20)
+    flow.clear_default_session()
+
+if __name__ == "__main__":
+    main()
+```
 
 88. oneflow/python/test/models/insightface/save_insightface_model.py 
+```.py
+"""
+Copyright 2020 The OneFlow Authors. All rights reserved.
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+    http://www.apache.org/licenses/LICENSE-2.0
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+"""
+import os
+import shutil
+import argparse
+import oneflow as flow
+import fresnet100
+
+
+def _init_oneflow_env_and_config():
+    flow.env.init()
+    flow.enable_eager_execution(False)
+    flow.config.enable_legacy_model_io(True)
+
+
+def _make_insightface_predict_func(width, height):
+    batch_size = 1
+    channels = 3
+
+    func_cfg = flow.function_config()
+    func_cfg.default_placement_scope(flow.scope.placement("cambricon", "0:0"))
+
+    @flow.global_function("predict", function_config=func_cfg)
+    def predict_fn(
+        image: flow.typing.Numpy.Placeholder(
+            shape=(batch_size, height, width, channels), dtype=flow.float32
+        )
+    ) -> flow.typing.Numpy:
+        embeding = fresnet100.get_symbol(image)
+        return embeding
+
+    return predict_fn
+
+
+def main(args):
+    _init_oneflow_env_and_config()
+
+    predict_fn = _make_insightface_predict_func(args.image_width, args.image_height)
+    flow.train.CheckPoint().load(args.model_dir)
+    # flow.load_variables(flow.checkpoint.get(args.model_dir))
+    print("predict_fn construct finished")
+
+    saved_model_path = args.save_dir
+    model_version = args.model_version
+
+    model_version_path = os.path.join(saved_model_path, str(model_version))
+    if os.path.exists(model_version_path) and os.path.isdir(model_version_path):
+        if args.force_save:
+            print(
+                f"WARNING: The model version path '{model_version_path}' already exist"
+                ", old version directory will be replaced"
+            )
+            shutil.rmtree(model_version_path)
+        else:
+            raise ValueError(
+                f"The model version path '{model_version_path}' already exist"
+            )
+
+    saved_model_builder = (
+        flow.saved_model.ModelBuilder(saved_model_path)
+        .ModelName(args.model_name)
+        .Version(model_version)
+    )
+    saved_model_builder.AddFunction(predict_fn).Finish()
+    saved_model_builder.Save()
+
+
+def _parse_args():
+    parser = argparse.ArgumentParser("flags for save insightface model")
+    parser.add_argument(
+        "--model_dir",
+        type=str,
+        default="stylenet_nhwc",
+        help="model parameters directory",
+    )
+    parser.add_argument(
+        "--save_dir",
+        type=str,
+        default="insightface_models",
+        help="directory to save models",
+    )
+    parser.add_argument(
+        "--model_name", type=str, default="insightface", help="model name"
+    )
+    parser.add_argument("--model_version", type=int, default=1, help="model version")
+    parser.add_argument(
+        "--force_save",
+        default=False,
+        action="store_true",
+        help="force save model whether already exists or not",
+    )
+    parser.add_argument(
+        "--image_width", type=int, default=224, help="input image width"
+    )
+    parser.add_argument(
+        "--image_height", type=int, default=224, help="input image height"
+    )
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = _parse_args()
+    main(args)
+```
 
 89. oneflow/python/test/models/insightface/save_insightface_model.sh
+```.sh
+#!/bin/bash
+set -ex
+
+# download model parameters for first-time 
+# wget https://oneflow-public.oss-cn-beijing.aliyuncs.com/model_zoo/cambricon/insightface.tar.gz
+# tar zxvf insightface.tar.gz
+
+base_dir=`dirname $0`
+
+python3 $base_dir/save_insightface_model.py \
+    --model_dir insightface \
+    --save_dir insightface_models \
+    --model_version 1 \
+    --image_width 112 \
+    --image_height 112 \
+    --force_save
+```
 
 90. oneflow/python/test/models/insightface/validate.sh
+```.sh
+# !/bin/bash
+
+MODEL_LOAD_DIR="./insightface_nhwc/"
+
+INPUT_IMAGE="./images/dog.jpeg"
+
+python3 insightface_val.py \
+    --val_img_dir $INPUT_IMAGE \
+    --model_load_dir $MODEL_LOAD_DIR
+```
 
 91. oneflow/python/test/models/resnet50/README.md 
+```.md
+# resnet50 classification
+
+## 使用方法
+
+- 从`https://oneflow-public.oss-cn-beijing.aliyuncs.com/model_zoo/cambricon/resnet50.tar.gz`下载模型和图片到当前`infer.sh`所在的目录
+- 执行`sh infer.sh`即可获得 resnet50 分类预测结果
+```
 
 92. oneflow/python/test/models/resnet50/imagenet1000_clsidx_to_labels.py
+```.py
+clsidx_2_labels = {
+    0: "tench, Tinca tinca",
+    1: "goldfish, Carassius auratus",
+    2: "great white shark, white shark, man-eater, man-eating shark, Carcharodon carcharias",
+
+```
 
 93. oneflow/python/test/models/resnet50/infer.sh
+```.sh
+MODEL_LOAD_DIR="./resnet50_nhwc/"
+
+INPUT_IMAGE="./images/fish.jpg"
+
+python3 infer_resnet50.py \
+    --input_image_path $INPUT_IMAGE \
+    --model_load_dir $MODEL_LOAD_DIR
+```
 
 94. oneflow/python/test/models/resnet50/infer_resnet50.py
+```.py
+import oneflow as flow
+import oneflow.typing as tp
+
+import argparse
+import cv2
+import numpy as np
+
+from imagenet1000_clsidx_to_labels import clsidx_2_labels
+from resnet50_model import resnet50
+
+def load_image(image_path):
+    im = cv2.imread(image_path)
+    im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
+    im = cv2.resize(im, (224, 224), interpolation=cv2.INTER_AREA)
+    im = (im - [123.68, 116.779, 103.939]) / [58.393, 57.12, 57.375]
+    im = np.expand_dims(im, axis=0)
+    return np.ascontiguousarray(im, "float32")
+
+
+flow.config.enable_legacy_model_io(True)
+
+
+def main(args):
+    input_image = load_image(args.input_image_path)
+    height = 224
+    width = 224
+    flow.env.init()
+    config = flow.function_config()
+    config.default_placement_scope(flow.scope.placement("cambricon", "0:0"))
+
+    @flow.global_function("predict", function_config=config)
+    def InferenceNet(
+        images: tp.Numpy.Placeholder((1, height, width, 3), dtype=flow.float)
+    ) -> tp.Numpy:
+        logits = resnet50(images, args, training=False)
+        predictions = flow.nn.softmax(logits)
+        return predictions
+
+    print("===============================>load begin")
+    flow.train.CheckPoint().load(args.model_load_dir)
+    print("===============================>load end")
+
+    import datetime
+
+    a = datetime.datetime.now()
+
+    print("predict begin")
+    reset_out = InferenceNet(input_image)
+    print("predict end")
+    clsidx = reset_out.argmax()
+
+    b = datetime.datetime.now()
+    c = b - a
+
+    print("time: %s ms, height: %d, width: %d" % (c.microseconds / 1000, height, width))
+    print(
+        "resnet50 predict prob %f, class %s"
+        % (reset_out.max(), clsidx_2_labels[clsidx])
+    )
+
+
+def get_parser(parser=None):
+    def str2bool(v):
+        if v.lower() in ("yes", "true", "t", "y", "1"):
+            return True
+        elif v.lower() in ("no", "false", "f", "n", "0"):
+            return False
+        else:
+            raise argparse.ArgumentTypeError("Unsupported value encountered.")
+
+    parser = argparse.ArgumentParser("flags for neural style")
+    parser.add_argument(
+        "--input_image_path", type=str, default="images/tiger.jpg", help="image path"
+    )
+    parser.add_argument(
+        "--model_load_dir", type=str, default="", help="model save directory"
+    )
+    parser.add_argument(
+        "--channel_last",
+        type=str2bool,
+        default=True,
+        help="Whether to use use channel last mode(nhwc)",
+    )
+    # fuse bn relu or bn add relu
+    parser.add_argument(
+        "--fuse_bn_relu",
+        type=str2bool,
+        default=False,
+        help="Whether to use use fuse batch normalization relu. Currently supported in origin/master of OneFlow only.",
+    )
+    parser.add_argument(
+        "--fuse_bn_add_relu",
+        type=str2bool,
+        default=False,
+        help="Whether to use use fuse batch normalization add relu. Currently supported in origin/master of OneFlow only.",
+    )
+    parser.add_argument(
+        "--pad_output",
+        type=str2bool,
+        nargs="?",
+        const=True,
+        help="Whether to pad the output to number of image channels to 4.",
+    )
+    return parser
+
+
+if __name__ == "__main__":
+    parser = get_parser()
+    args = parser.parse_args()
+    main(args)
+```
 
 95. oneflow/python/test/models/resnet50/resnet50_model.py
+```.py
+import oneflow as flow
+
+BLOCK_COUNTS = [3, 4, 6, 3]
+BLOCK_FILTERS = [256, 512, 1024, 2048]
+BLOCK_FILTERS_INNER = [64, 128, 256, 512]
+
+
+class ResnetBuilder(object):
+    def __init__(
+        self,
+        weight_regularizer,
+        trainable=True,
+        training=True,
+        channel_last=False,
+        fuse_bn_relu=True,
+        fuse_bn_add_relu=True,
+    ):
+        self.data_format = "NHWC" if channel_last else "NCHW"
+        self.weight_initializer = flow.variance_scaling_initializer(
+            2, "fan_in", "random_normal", data_format=self.data_format
+        )
+        self.weight_regularizer = weight_regularizer
+        self.trainable = trainable
+        self.training = training
+        self.fuse_bn_relu = fuse_bn_relu
+        self.fuse_bn_add_relu = fuse_bn_add_relu
+
+    def _conv2d(
+        self, name, input, filters, kernel_size, strides=1, padding="SAME", dilations=1,
+    ):
+        # There are different shapes of weight metric between 'NCHW' and 'NHWC' mode
+        if self.data_format == "NHWC":
+            shape = (filters, kernel_size, kernel_size, input.shape[3])
+        else:
+            shape = (filters, input.shape[1], kernel_size, kernel_size)
+        weight = flow.get_variable(
+            name + "-weight",
+            shape=shape,
+            dtype=input.dtype,
+            initializer=self.weight_initializer,
+            regularizer=self.weight_regularizer,
+            model_name="weight",
+            trainable=self.trainable,
+        )
+
+        return flow.nn.conv2d(
+            input, weight, strides, padding, self.data_format, dilations, name=name
+        )
+
+    def _batch_norm(self, inputs, name=None, last=False):
+        initializer = flow.zeros_initializer() if last else flow.ones_initializer()
+        axis = 1
+        if self.data_format == "NHWC":
+            axis = 3
+        return flow.layers.batch_normalization(
+            inputs=inputs,
+            axis=axis,
+            momentum=0.9,  # 97,
+            epsilon=1e-5,
+            center=True,
+            scale=True,
+            trainable=self.trainable,
+            training=self.training,
+            gamma_initializer=initializer,
+            moving_variance_initializer=initializer,
+            gamma_regularizer=self.weight_regularizer,
+            beta_regularizer=self.weight_regularizer,
+            name=name,
+        )
+
+    def _batch_norm_relu(self, inputs, name=None, last=False):
+        if self.fuse_bn_relu:
+            initializer = flow.zeros_initializer() if last else flow.ones_initializer()
+            axis = 1
+            if self.data_format == "NHWC":
+                axis = 3
+            return flow.layers.batch_normalization_relu(
+                inputs=inputs,
+                axis=axis,
+                momentum=0.9,
+                epsilon=1e-5,
+                center=True,
+                scale=True,
+                trainable=self.trainable,
+                training=self.training,
+                gamma_initializer=initializer,
+                moving_variance_initializer=initializer,
+                gamma_regularizer=self.weight_regularizer,
+                beta_regularizer=self.weight_regularizer,
+                name=name + "_bn_relu",
+            )
+        else:
+            return flow.nn.relu(self._batch_norm(inputs, name + "_bn", last=last))
+
+    def _batch_norm_add_relu(self, inputs, addend, name=None, last=False):
+        if self.fuse_bn_add_relu:
+            initializer = flow.zeros_initializer() if last else flow.ones_initializer()
+            axis = 1
+            if self.data_format == "NHWC":
+                axis = 3
+            return flow.layers.batch_normalization_add_relu(
+                inputs=inputs,
+                addend=addend,
+                axis=axis,
+                momentum=0.9,
+                epsilon=1e-5,
+                center=True,
+                scale=True,
+                trainable=self.trainable,
+                training=self.training,
+                gamma_initializer=initializer,
+                moving_variance_initializer=initializer,
+                gamma_regularizer=self.weight_regularizer,
+                beta_regularizer=self.weight_regularizer,
+                name=name + "_bn_add_relu",
+            )
+        else:
+            return flow.nn.relu(
+                self._batch_norm(inputs, name + "_bn", last=last) + addend
+            )
+
+    def conv2d_affine(self, input, name, filters, kernel_size, strides):
+        # input data_format must be NCHW, cannot check now
+        padding = "SAME" if strides > 1 or kernel_size > 1 else "VALID"
+        output = self._conv2d(name, input, filters, kernel_size, strides, padding)
+        return output
+
+    def bottleneck_transformation(
+        self, input, block_name, filters, filters_inner, strides
+    ):
+        a = self.conv2d_affine(input, block_name + "_branch2a", filters_inner, 1, 1)
+        a = self._batch_norm_relu(a, block_name + "_branch2a")
+
+        b = self.conv2d_affine(a, block_name + "_branch2b", filters_inner, 3, strides)
+        b = self._batch_norm_relu(b, block_name + "_branch2b")
+
+        c = self.conv2d_affine(b, block_name + "_branch2c", filters, 1, 1)
+        return c
+
+    def residual_block(self, input, block_name, filters, filters_inner, strides_init):
+        if strides_init != 1 or block_name == "res2_0":
+            shortcut = self.conv2d_affine(
+                input, block_name + "_branch1", filters, 1, strides_init
+            )
+            shortcut = self._batch_norm(shortcut, block_name + "_branch1_bn")
+        else:
+            shortcut = input
+
+        bottleneck = self.bottleneck_transformation(
+            input, block_name, filters, filters_inner, strides_init,
+        )
+        return self._batch_norm_add_relu(
+            bottleneck, shortcut, block_name + "_branch2c", last=True
+        )
+
+    def residual_stage(
+        self, input, stage_name, counts, filters, filters_inner, stride_init=2
+    ):
+        output = input
+        for i in range(counts):
+            block_name = "%s_%d" % (stage_name, i)
+            output = self.residual_block(
+                output, block_name, filters, filters_inner, stride_init if i == 0 else 1
+            )
+
+        return output
+
+    def resnet_conv_x_body(self, input):
+        output = input
+        for i, (counts, filters, filters_inner) in enumerate(
+            zip(BLOCK_COUNTS, BLOCK_FILTERS, BLOCK_FILTERS_INNER)
+        ):
+            stage_name = "res%d" % (i + 2)
+            output = self.residual_stage(
+                output, stage_name, counts, filters, filters_inner, 1 if i == 0 else 2
+            )
+        return output
+
+    def resnet_stem(self, input):
+        conv1 = self._conv2d("conv1", input, 64, 7, 2)
+        conv1_bn = self._batch_norm_relu(conv1, "conv1")
+        pool1 = flow.nn.max_pool2d(
+            conv1_bn,
+            ksize=3,
+            strides=2,
+            padding="SAME",
+            data_format=self.data_format,
+            name="pool1",
+        )
+        return pool1
+
+
+def resnet50(images, args, trainable=True, training=True):
+    weight_regularizer = None
+    builder = ResnetBuilder(
+        weight_regularizer,
+        trainable,
+        training,
+        args.channel_last,
+        args.fuse_bn_relu,
+        args.fuse_bn_add_relu,
+    )
+    if args.pad_output:
+        if args.channel_last:
+            paddings = ((0, 0), (0, 0), (0, 0), (0, 1))
+        else:
+            paddings = ((0, 0), (0, 1), (0, 0), (0, 0))
+        images = flow.pad(images, paddings=paddings)
+    with flow.scope.namespace("Resnet"):
+        stem = builder.resnet_stem(images)
+        body = builder.resnet_conv_x_body(stem)
+        pool5 = flow.nn.avg_pool2d(
+            body,
+            ksize=7,
+            strides=1,
+            padding="VALID",
+            data_format=builder.data_format,
+            name="pool5",
+        )
+        fc1001 = flow.layers.dense(
+            flow.reshape(pool5, (pool5.shape[0], -1)),
+            units=1000,
+            use_bias=True,
+            kernel_initializer=flow.variance_scaling_initializer(
+                2, "fan_in", "random_normal"
+            ),
+            bias_initializer=flow.zeros_initializer(),
+            kernel_regularizer=weight_regularizer,
+            bias_regularizer=weight_regularizer,
+            trainable=trainable,
+            name="fc1001",
+        )
+    return fc1001
+```
 
 96. oneflow/python/test/models/resnet50/save_model.py
+```.py
+import argparse
+import os
+import shutil
+
+import oneflow as flow
+import oneflow.typing as tp
+
+from resnet50_model import resnet50
+
+def _init_oneflow_env_and_config():
+    flow.env.init()
+    flow.enable_eager_execution(False)
+    flow.config.enable_legacy_model_io(True)
+
+def _make_resnet50_predict_func(args):
+    batch_size = 1
+    channels = 3
+
+    func_cfg = flow.function_config()
+    func_cfg.default_placement_scope(flow.scope.placement("cambricon", "0:0"))
+
+    @flow.global_function("predict", function_config=func_cfg)
+    def predict_fn(
+        images: tp.Numpy.Placeholder((1, args.image_height, args.image_width, channels), dtype=flow.float)
+    ) -> tp.Numpy:
+        logits = resnet50(images, args, training=False)
+        predictions = flow.nn.softmax(logits)
+        return predictions
+
+    return predict_fn
+
+
+def main(args):
+    _init_oneflow_env_and_config()
+
+    predict_fn = _make_resnet50_predict_func(args)
+    flow.train.CheckPoint().load(args.model_dir)
+    print("predict_fn construct finished")
+
+    saved_model_path = args.save_dir
+    model_version = args.model_version
+
+    model_version_path = os.path.join(saved_model_path, str(model_version))
+    if os.path.exists(model_version_path) and os.path.isdir(model_version_path):
+        if args.force_save:
+            print(
+                f"WARNING: The model version path '{model_version_path}' already exist"
+                ", old version directory will be replaced"
+            )
+            shutil.rmtree(model_version_path)
+        else:
+            raise ValueError(
+                f"The model version path '{model_version_path}' already exist"
+            )
+
+    saved_model_builder = (
+        flow.saved_model.ModelBuilder(saved_model_path)
+        .ModelName(args.model_name)
+        .Version(model_version)
+    )
+    saved_model_builder.AddFunction(predict_fn).Finish()
+    saved_model_builder.Save()
+
+
+def _parse_args():
+    def str2bool(v):
+        if v.lower() in ("yes", "true", "t", "y", "1"):
+            return True
+        elif v.lower() in ("no", "false", "f", "n", "0"):
+            return False
+        else:
+            raise argparse.ArgumentTypeError("Unsupported value encountered.")
+
+    parser = argparse.ArgumentParser("flags for save resnet50 model")
+    parser.add_argument(
+        "--model_dir",
+        type=str,
+        default="resnet50_nhwc",
+        help="model parameters directory",
+    )
+    parser.add_argument(
+        "--save_dir",
+        type=str,
+        default="resnet50_models",
+        help="directory to save models",
+    )
+    parser.add_argument(
+        "--model_name", type=str, default="resnet50", help="model name"
+    )
+    parser.add_argument("--model_version", type=int, default=1, help="model version")
+    parser.add_argument(
+        "--force_save",
+        default=False,
+        action="store_true",
+        help="force save model whether already exists or not",
+    )
+    parser.add_argument(
+        "--image_width", type=int, default=224, help="input image width"
+    )
+    parser.add_argument(
+        "--image_height", type=int, default=224, help="input image height"
+    )
+    parser.add_argument(
+        "--channel_last",
+        type=str2bool,
+        default=True,
+        help="Whether to use use channel last mode(nhwc)",
+    )
+    # fuse bn relu or bn add relu
+    parser.add_argument(
+        "--fuse_bn_relu",
+        type=str2bool,
+        default=False,
+        help="Whether to use use fuse batch normalization relu. Currently supported in origin/master of OneFlow only.",
+    )
+    parser.add_argument(
+        "--fuse_bn_add_relu",
+        type=str2bool,
+        default=False,
+        help="Whether to use use fuse batch normalization add relu. Currently supported in origin/master of OneFlow only.",
+    )
+    parser.add_argument(
+        "--pad_output",
+        type=str2bool,
+        nargs="?",
+        const=True,
+        help="Whether to pad the output to number of image channels to 4.",
+    )
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = _parse_args()
+    main(args)
+```
 
 97. oneflow/python/test/models/resnet50/save_model.sh
+```.sh
+#!/bin/bash
+set -ex
+
+# download model parameters for first-time 
+# wget https://oneflow-public.oss-cn-beijing.aliyuncs.com/model_zoo/cambricon/resnet50.tar.gz
+# tar zxvf resnet50.tar.gz
+
+base_dir=`dirname $0`
+
+python3 $base_dir/save_model.py \
+    --model_dir resnet50_nhwc \
+    --save_dir resnet50_models \
+    --model_version 1 \
+    --force_save
+```
 
 98. oneflow/python/test/models/styletransform/README.md
+```.md
+# styletransform
+
+## 使用方法
+
+- 从`https://oneflow-public.oss-cn-beijing.aliyuncs.com/model_zoo/cambricon/styletranform.tar.gz`下载模型和图片到当前`infer.sh`所在的目录
+- 执行`sh infer.sh`即可获得StyleNet风格化（素描）后的结果图片
+
+## 保存 model（for serving）
+
+首先下载并解压模型所需的参数
+
+`bash
+wget https://oneflow-public.oss-cn-beijing.aliyuncs.com/model_zoo/cambricon/styletranform.tar.gz
+tar zxvf styletranform.tar.gz
+`
+
+如果想导出 gpu 平台的模型，则要在支持 gpu 的环境中，执行
+`bash
+bash save_style_model.sh gpu
+`
+
+如果想导出 寒武纪 平台的模型，则要在支持 寒武纪 的环境中，执行
+`bash
+bash save_style_model.sh cambricon
+`
+
+save_style_model.sh 中的参数
+- backend: 设置 device 类型
+- model_dir: 模型所需的参数的目录，通过上面的下载解压命令后可以得到的 stylenet_nhwc 目录即是参数目录
+- save_dir: 模型保存的目录
+- model_version: 保存模型的版本号
+- image_width: 模型兼容的输入 image 的 width
+- image_height: 模型兼容的输入 image 的 height
+- force_save: 当 model_version 所指定的保存的模型的版本号已存在时，是否强制覆盖保存
+```
 
 99. oneflow/python/test/models/styletransform/infer.sh
+```.sh
+MODEL_LOAD_DIR="./stylenet_nhwc/"
+
+INPUT_IMAGE="./images/content-images/amber.jpg"
+OUTPUT_IMAGE="./images/style_out_amber_nhwc.jpg"
+
+BACKEND=${1:-gpu}
+
+python3 infer_of_neural_style.py \
+    --backend $BACKEND \
+    --input_image_path $INPUT_IMAGE \
+    --output_image_path $OUTPUT_IMAGE \
+    --model_load_dir $MODEL_LOAD_DIR
+```
 
 100. oneflow/python/test/models/styletransform/infer_of_neural_style.py
+```.py
+import numpy as np
+import argparse
+import cv2
+
+import oneflow as flow
+import oneflow.typing as tp
+import style_model
+
+
+def float_list(x):
+    return list(map(float, x.split(",")))
+
+
+def load_image(image_path):
+    im = cv2.imread(image_path)
+    im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
+    im = np.transpose(im, (2, 0, 1))
+    im = np.expand_dims(im, axis=0)
+    im = np.transpose(im, (0, 2, 3, 1))
+    return np.ascontiguousarray(im, "float32")
+
+
+def recover_image(im):
+    im = np.squeeze(im)
+    print(im.shape)
+    # im = np.transpose(im, (1, 2, 0))
+    im = cv2.cvtColor(np.float32(im), cv2.COLOR_RGB2BGR)
+    return im.astype(np.uint8)
+
+
+flow.config.enable_legacy_model_io(True)
+
+
+def main(args):
+    input_image = load_image(args.input_image_path)
+    height = input_image.shape[1]
+    width = input_image.shape[2]
+    flow.env.init()
+    config = flow.function_config()
+    config.default_placement_scope(flow.scope.placement(args.backend, "0:0"))
+
+    @flow.global_function("predict", function_config=config)
+    def PredictNet(
+        image: tp.Numpy.Placeholder((1, height, width, 3), dtype=flow.float32)
+    ) -> tp.Numpy:
+        style_out = style_model.styleNet(image, trainable=True, backend=args.backend)
+        return style_out
+
+    print("===============================>load begin")
+    # flow.load_variables(flow.checkpoint.get(args.model_load_dir))
+    flow.train.CheckPoint().load(args.model_load_dir)
+    print("===============================>load end")
+
+    import datetime
+
+    a = datetime.datetime.now()
+
+    print("predict begin")
+    style_out = PredictNet(input_image)
+    style_out = np.clip(style_out, 0, 255)
+    print("predict end")
+
+    b = datetime.datetime.now()
+    c = b - a
+
+    print("time: %s ms, height: %d, width: %d" % (c.microseconds / 1000, height, width))
+
+    cv2.imwrite(args.output_image_path, recover_image(style_out))
+    # flow.checkpoint.save("./stylenet")
+
+
+def get_parser(parser=None):
+    parser = argparse.ArgumentParser("flags for neural style")
+    parser.add_argument(
+        "--backend",
+        type=str,
+        default="gpu",
+        help="gpu or cambricon"
+    )
+    parser.add_argument(
+        "--input_image_path", type=str, default="test_img/tiger.jpg", help="image path"
+    )
+    parser.add_argument(
+        "--output_image_path", type=str, default="test_img/tiger.jpg", help="image path"
+    )
+    parser.add_argument(
+        "--model_load_dir", type=str, default="", help="model save directory"
+    )
+    return parser
+
+
+if __name__ == "__main__":
+    parser = get_parser()
+    args = parser.parse_args()
+    main(args)
+```
 
 101. oneflow/python/test/models/styletransform/requirements.txt 
+```.txt
+numpy==1.17.4
+opencv-python==4.2.0.32
+```
 
 102. oneflow/python/test/models/styletransform/save_style_model.py 
+```.py
+import os
+import shutil
+import argparse
+import oneflow as flow
+import style_model
+
+
+def _init_oneflow_env_and_config():
+    flow.env.init()
+    flow.enable_eager_execution(False)
+    flow.config.enable_legacy_model_io(True)
+
+
+def _make_style_transform_predict_func(width, height, backend="gpu"):
+    batch_size = 1
+    channels = 3
+
+    func_cfg = flow.function_config()
+    func_cfg.default_placement_scope(flow.scope.placement(backend, "0:0"))
+
+    @flow.global_function("predict", function_config=func_cfg)
+    def predict_fn(
+        image: flow.typing.Numpy.Placeholder(
+            shape=(batch_size, height, width, channels), dtype=flow.float32
+        )
+    ) -> flow.typing.Numpy:
+        style_out = style_model.styleNet(image, backend=backend)
+        return style_out
+
+    return predict_fn
+
+
+def main(args):
+    _init_oneflow_env_and_config()
+
+    predict_fn = _make_style_transform_predict_func(args.image_width, args.image_height, args.backend)
+    flow.train.CheckPoint().load(args.model_dir)
+    # flow.load_variables(flow.checkpoint.get(args.model_dir))
+    print("predict_fn construct finished")
+
+    saved_model_path = args.save_dir
+    model_version = args.model_version
+
+    model_version_path = os.path.join(saved_model_path, str(model_version))
+    if os.path.exists(model_version_path) and os.path.isdir(model_version_path):
+        if args.force_save:
+            print(
+                f"WARNING: The model version path '{model_version_path}' already exist"
+                ", old version directory will be replaced"
+            )
+            shutil.rmtree(model_version_path)
+        else:
+            raise ValueError(
+                f"The model version path '{model_version_path}' already exist"
+            )
+
+    saved_model_builder = (
+        flow.saved_model.ModelBuilder(saved_model_path)
+        .ModelName(args.model_name)
+        .Version(model_version)
+    )
+    saved_model_builder.AddFunction(predict_fn).Finish()
+    saved_model_builder.Save()
+
+
+def _parse_args():
+    parser = argparse.ArgumentParser("flags for save style transform model")
+    parser.add_argument(
+        "--backend",
+        type=str,
+        default="gpu",
+        help="gpu or cambricon"
+    )
+    parser.add_argument(
+        "--model_dir",
+        type=str,
+        default="stylenet_nhwc",
+        help="model parameters directory",
+    )
+    parser.add_argument(
+        "--save_dir",
+        type=str,
+        default="style_transform_models",
+        help="directory to save models",
+    )
+    parser.add_argument(
+        "--model_name", type=str, default="style_transform", help="model name"
+    )
+    parser.add_argument("--model_version", type=int, default=1, help="model version")
+    parser.add_argument(
+        "--force_save",
+        default=False,
+        action="store_true",
+        help="force save model whether already exists or not",
+    )
+    parser.add_argument(
+        "--image_width", type=int, default=640, help="input image width"
+    )
+    parser.add_argument(
+        "--image_height", type=int, default=640, help="input image height"
+    )
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = _parse_args()
+    main(args)
+```
 
 103. oneflow/python/test/models/styletransform/save_style_model.sh
+```.sh
+#!/bin/bash
+set -ex
+
+# download model parameters for first-time 
+# wget https://oneflow-public.oss-cn-beijing.aliyuncs.com/model_zoo/cambricon/styletranform.tar.gz
+# tar zxvf styletranform.tar.gz
+
+base_dir=`dirname $0`
+BACKEND="${1:-gpu}"
+SERVING_MODEL_NAME="style_transform_models_${BACKEND}"
+
+python3 $base_dir/save_style_model.py \
+    --backend $BACKEND \
+    --model_dir stylenet_nhwc \
+    --save_dir $SERVING_MODEL_NAME \
+    --model_version 1 \
+    --image_width 640 \
+    --image_height 640 \
+    --force_save
+```
 
 104. oneflow/python/test/models/styletransform/style_model.py
+```.py
+import oneflow as flow
+
+
+def instance_norm_cambricon(input, name_prefix, trainable=True):
+    out, mean, var = flow.nn.InstanceNorm2d(input, name=name_prefix)
+    return out
+
+def instance_norm_gpu(input, name_prefix, trainable = True):
+    (mean, variance) = flow.nn.moments(input, [1, 2], keepdims = True)
+    gamma = flow.get_variable(
+        name_prefix + "_gamma",
+        shape = (1, 1, 1, input.shape[3]),
+        dtype=input.dtype,
+        initializer = flow.ones_initializer(),
+        trainable = trainable
+    )
+    beta = flow.get_variable(
+        name_prefix + "_beta",
+        shape = (1, 1, 1, input.shape[3]),
+        dtype=input.dtype,
+        initializer = flow.zeros_initializer(),
+        trainable = trainable
+    )
+    epsilon = 1e-5
+    normalized = (input - mean) / flow.math.sqrt(variance + epsilon)
+    return gamma * normalized + beta
+
+def instance_norm(input, name_prefix, trainable=True, backend="gpu"):
+    if backend == "gpu":
+        return instance_norm_gpu(input, name_prefix, trainable)
+    elif backend == "cambricon":
+        return instance_norm_cambricon(input, name_prefix, trainable)
+    else:
+        return None
+
+def conv2d_layer(
+    name,
+    input,
+    out_channel,
+    kernel_size=3,
+    strides=1,
+    padding="SAME",
+    data_format="NHWC",
+    dilation_rate=1,
+    use_bias=True,
+    weight_initializer=flow.variance_scaling_initializer(
+        2, "fan_out", "random_normal", data_format="NHWC"
+    ),
+    bias_initializer=flow.zeros_initializer(),
+    trainable=True,
+):
+    weight_shape = (out_channel, kernel_size, kernel_size, input.shape[3])
+    weight = flow.get_variable(
+        name + "_weight",
+        shape=weight_shape,
+        dtype=input.dtype,
+        initializer=weight_initializer,
+        trainable=trainable,
+    )
+    output = flow.nn.conv2d(
+        input, weight, strides, padding, data_format, dilation_rate, name=name
+    )
+    if use_bias:
+        bias = flow.get_variable(
+            name + "_bias",
+            shape=(out_channel,),
+            dtype=input.dtype,
+            initializer=bias_initializer,
+            trainable=trainable,
+        )
+        output = flow.nn.bias_add(output, bias, data_format)
+    return output
+
+
+def upsampleConvLayer(
+    input,
+    name_prefix,
+    channel,
+    kernel_size,
+    hw_scale=(2, 2),
+    data_format="NHWC",
+    # interpolation = "bilinear",
+    interpolation="nearest",
+    trainable=True,
+):
+    upsample = flow.layers.upsample_2d(
+        input,
+        size=hw_scale,
+        data_format=data_format,
+        interpolation=interpolation,
+        name=name_prefix + "_%s" % interpolation,
+    )
+    return conv2d_layer(
+        name_prefix + "_conv",
+        upsample,
+        channel,
+        kernel_size=kernel_size,
+        strides=1,
+        trainable=trainable,
+    )
+
+
+def resBlock(input, channel, name_prefix, trainable=True, backend="gpu"):
+    out = conv2d_layer(
+        name_prefix + "_conv1",
+        input,
+        channel,
+        kernel_size=3,
+        strides=1,
+        trainable=trainable,
+    )
+    out = instance_norm(out, name_prefix + "_in1", trainable=trainable, backend=backend)
+    out = flow.nn.relu(out)
+    out = conv2d_layer(
+        name_prefix + "_conv2",
+        out,
+        channel,
+        kernel_size=3,
+        strides=1,
+        trainable=trainable,
+    )
+    out = instance_norm(out, name_prefix + "_in2", trainable=trainable, backend=backend)
+    return out + input
+
+
+def styleNet(input, trainable=True, backend="gpu"):
+    with flow.scope.namespace("style_transfer"):
+        # Initial convolution layers
+        conv1 = conv2d_layer(
+            "first_conv", input, 32, kernel_size=9, strides=1, trainable=trainable
+        )
+        in1 = instance_norm(conv1, "first_conv_in", backend=backend)
+        in1 = flow.nn.relu(in1)
+        conv2 = conv2d_layer(
+            "second_conv", in1, 64, kernel_size=3, strides=2, trainable=trainable
+        )
+        in2 = instance_norm(conv2, "second_conv_in", backend=backend)
+        in2 = flow.nn.relu(in2)
+        conv3 = conv2d_layer(
+            "third_conv", in2, 128, kernel_size=3, strides=2, trainable=trainable
+        )
+        in3 = instance_norm(conv3, "third_conv_in", trainable=trainable, backend=backend)
+        in3 = flow.nn.relu(in3)
+        # Residual layers
+        res1 = resBlock(in3, 128, "res1", trainable=trainable, backend=backend)
+        res2 = resBlock(res1, 128, "res2", trainable=trainable, backend=backend)
+        res3 = resBlock(res2, 128, "res3", trainable=trainable, backend=backend)
+        res4 = resBlock(res3, 128, "res4", trainable=trainable, backend=backend)
+        res5 = resBlock(res4, 128, "res5", trainable=trainable, backend=backend)
+        # Upsampling Layers
+        upsample1 = upsampleConvLayer(res5, "upsample1", 64, 3, trainable=trainable)
+        # upsample1 = deconv(res5, 64, "upsample1", kernel_size = 4, strides = [2, 2], trainable = True)
+        in4 = instance_norm(upsample1, "upsample1_in", trainable=trainable, backend=backend)
+        in4 = flow.nn.relu(in4)
+        upsample2 = upsampleConvLayer(in4, "upsample2", 32, 3, trainable=trainable)
+        # upsample2 = deconv(in4, 32, "upsample2", kernel_size = 4, strides = [2, 2], trainable = True)
+        in5 = instance_norm(upsample2, "upsample2_in", trainable=trainable, backend=backend)
+        in5 = flow.nn.relu(in5)
+        out = conv2d_layer(
+            "last_conv", in5, 3, kernel_size=9, strides=1, trainable=trainable
+        )
+        # out = flow.clamp(conv1, 0, 255)
+        # print('out.shape', out.shape)
+    return out
+
+
+def mse_loss(input):
+    return flow.math.reduce_mean(flow.math.square(input))
+```
+
 
 105. oneflow/python/test/ops/_test_add_n_cambricon.py
 
