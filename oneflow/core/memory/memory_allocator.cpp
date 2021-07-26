@@ -21,6 +21,10 @@ limitations under the License.
 #include "oneflow/core/register/blob.h"
 #include "oneflow/core/common/tensor_buffer.h"
 #include "oneflow/core/record/record.pb.h"
+#include "oneflow/core/memory/memory_fake_dev_allocator.h"
+#ifdef WITH_CAMBRICON
+#include "oneflow/core/device/mlu_util.h"
+#endif
 
 namespace oneflow {
 
@@ -29,12 +33,16 @@ void* MemoryAllocatorImpl::Allocate(MemoryCase mem_case, size_t size) {
   if (mem_case.has_host_mem()) {
     if (mem_case.host_mem().has_cuda_pinned_mem()) {
 #ifdef WITH_CUDA
-      NumaAwareCudaMallocHost(mem_case.host_mem().cuda_pinned_mem().device_id(), &ptr, size);
+      if (Global<ResourceDesc, ForSession>::Get()->enable_numa_aware_cuda_malloc_host()) {
+        NumaAwareCudaMallocHost(mem_case.host_mem().cuda_pinned_mem().device_id(), &ptr, size);
+      } else {
+        OF_CUDA_CHECK(cudaMallocHost(&ptr, size));
+      }
 #else
       UNIMPLEMENTED();
 #endif
     } else {
-      ptr = aligned_alloc(kHostAlignSize, size);
+      ptr = malloc(size);
       CHECK_NOTNULL(ptr);
     }
   } else if (mem_case.has_device_cuda_mem()) {
@@ -44,6 +52,15 @@ void* MemoryAllocatorImpl::Allocate(MemoryCase mem_case, size_t size) {
 #else
     UNIMPLEMENTED();
 #endif
+  } else if (mem_case.has_fake_dev_mem()) {
+    ptr = FakeDevMemoryAllocatorImpl::Allocate(mem_case, size);
+  } else if (mem_case.has_device_cambricon_mem()) {
+#ifdef WITH_CAMBRICON
+    MLUCurrentDeviceGuard guard(mem_case.device_cambricon_mem().device_id());
+    CNRT_CHECK(cnrtMalloc(&ptr, size));
+#else
+    UNIMPLEMENTED();
+#endif  // WITH_CAMBRICON
   } else {
     UNIMPLEMENTED();
   }
@@ -68,13 +85,21 @@ void MemoryAllocatorImpl::Deallocate(void* ptr, MemoryCase mem_case) {
 #else
     UNIMPLEMENTED();
 #endif
+  } else if (mem_case.has_fake_dev_mem()) {
+    FakeDevMemoryAllocatorImpl::Deallocate(ptr, mem_case);
+  } else if (mem_case.has_device_cambricon_mem()) {
+#ifdef WITH_CAMBRICON
+    CNRT_CHECK(cnrtFree(ptr));
+#else
+    UNIMPLEMENTED();
+#endif  // WITH_CAMBRICON
   } else {
     UNIMPLEMENTED();
   }
 }
 
 void* MemoryAllocatorImpl::AllocateUnPinnedHostMem(size_t size) {
-  void* ptr = aligned_alloc(kHostAlignSize, size);
+  void* ptr = malloc(size);
   CHECK_NOTNULL(ptr);
   return ptr;
 }
@@ -97,6 +122,14 @@ char* MemoryAllocator::Allocate(MemoryCase mem_case, std::size_t size) {
 #else
     UNIMPLEMENTED();
 #endif
+  } else if (mem_case.has_fake_dev_mem()) {
+    memset(dptr, memset_val, size);
+  } else if (mem_case.has_device_cambricon_mem()) {
+#ifdef WITH_CAMBRICON
+    CNRT_CHECK(cnrtMemset(dptr, memset_val, size));
+#else
+    UNIMPLEMENTED();
+#endif  // WITH_CAMBRICON
   } else {
     UNIMPLEMENTED();
   }
@@ -109,15 +142,15 @@ void MemoryAllocator::Deallocate(char* dptr, MemoryCase mem_case) {
 }
 
 void InitNonPODTypeBlobIfNeed(MemoryAllocator* allocator, Blob* blob_ptr) {
-  const BlobDesc& blob_desc = blob_ptr->blob_desc();
+  const RtBlobDesc& blob_desc = blob_ptr->blob_desc();
   if (blob_desc.data_type() == kOFRecord) {
-    int64_t elem_cnt = blob_desc.shape().elem_cnt();
+    int64_t elem_cnt = blob_desc.body_shape().elem_cnt();
     FOR_RANGE(int64_t, idx, 0, elem_cnt) {
       allocator->PlacementNew(&blob_ptr->mut_dptr<OFRecord>()[idx]);
     }
   }
   if (blob_desc.data_type() == kTensorBuffer) {
-    int64_t elem_cnt = blob_desc.shape().elem_cnt();
+    int64_t elem_cnt = blob_desc.body_shape().elem_cnt();
     FOR_RANGE(int64_t, idx, 0, elem_cnt) {
       allocator->PlacementNew(&blob_ptr->mut_dptr<TensorBuffer>()[idx]);
     }

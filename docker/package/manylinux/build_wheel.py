@@ -136,7 +136,8 @@ def get_common_docker_args(
     current_dir=None,
     house_dir=None,
     use_system_proxy=True,
-):
+    cambricon=None, 
+): 
     root = Path(cache_dir)
     child = Path(current_dir)
     assert root in child.parents
@@ -148,7 +149,8 @@ def get_common_docker_args(
         house_dir_arg = f"-v {house_dir}:{house_dir}"
     build_dir_arg = get_build_dir_arg(cache_dir, oneflow_src_dir)
     proxy_env_arg = get_proxy_env_args() if use_system_proxy else ""
-    return f"-v {oneflow_src_dir}:{oneflow_src_dir} {proxy_env_arg} {pwd_arg} {house_dir_arg} {cache_dir_arg} {build_dir_arg} -w {current_dir} --shm-size=8g"
+    cambricon_arg = "--env NEUWARE_HOME=/usr/local/neuware" if cambricon else ""
+    return f"-v {oneflow_src_dir}:{oneflow_src_dir} {proxy_env_arg} {pwd_arg} {cambricon_arg} {house_dir_arg} {cache_dir_arg} {build_dir_arg} -w {current_dir} --shm-size=8g"
 
 
 def build_third_party(
@@ -161,6 +163,7 @@ def build_third_party(
     bash_wrap,
     dry,
     use_system_proxy,
+    cambricon,
 ):
     third_party_build_dir = os.path.join(cache_dir, "build-third-party")
     cmake_cmd = " ".join(
@@ -185,6 +188,7 @@ make -j`nproc` prepare_oneflow_third_party
         cache_dir=cache_dir,
         current_dir=third_party_build_dir,
         use_system_proxy=use_system_proxy,
+        cambricon=cambricon,
     )
     docker_cmd = (
         f"docker run --network=host {extra_docker_args} --rm {common_docker_args}"
@@ -217,6 +221,7 @@ def build_oneflow(
     bash_wrap,
     dry,
     use_system_proxy,
+    cambricon,
     enter_bash,
 ):
     oneflow_build_dir = os.path.join(cache_dir, "build-oneflow")
@@ -240,6 +245,7 @@ def build_oneflow(
         current_dir=oneflow_build_dir,
         house_dir=house_dir,
         use_system_proxy=use_system_proxy,
+        cambricon=cambricon,
     )
     docker_cmd = (
         f"docker run --network=host --rm {common_docker_args} {extra_docker_args}"
@@ -343,6 +349,9 @@ if __name__ == "__main__":
         "--use_aliyun_mirror", default=False, action="store_true", required=False
     )
     parser.add_argument("--cpu", default=False, action="store_true", required=False)
+    parser.add_argument(
+        "--cambricon", default=False, action="store_true", required=False
+    )
     parser.add_argument("--bash", default=False, action="store_true", required=False)
     parser.add_argument("--retry", default=0, type=int)
     args = parser.parse_args()
@@ -355,7 +364,7 @@ if __name__ == "__main__":
     cuda_versions = []
     if args.use_aliyun_mirror:
         extra_oneflow_cmake_args += " -DTHIRD_PARTY_MIRROR=aliyun"
-    if args.cpu:
+    if args.cpu or args.cambricon:
         extra_oneflow_cmake_args += " -DBUILD_CUDA=OFF"
         cuda_versions = ["10.2"]
     else:
@@ -461,12 +470,24 @@ gcc --version
                     bash_wrap,
                     args.dry,
                     args.use_system_proxy,
+                    args.cambricon,
                 )
             print(cuda_version.split("."))
             cuda_version_literal = "".join(cuda_version.split(".")[:2])
             assert len(cuda_version_literal) == 3
             python_versions = args.python_version.split(",")
             python_versions = [pv.strip() for pv in python_versions]
+            
+            package_name = None
+            if args.cpu:
+                package_name = "oneflow_cpu"
+            elif args.cambricon:
+                package_name = "oneflow_cambricon"
+            else:
+                package_name = f"oneflow_cu{cuda_version_literal}"
+                if args.xla:
+                    package_name += "_xla"
+
             for python_version in python_versions:
                 print("building for python version:", python_version)
                 build_oneflow(
@@ -484,6 +505,7 @@ gcc --version
                     args.dry,
                     args.use_system_proxy,
                     args.bash,
+                    args.cambricon,
                 )
 
         try:

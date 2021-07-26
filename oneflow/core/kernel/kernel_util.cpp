@@ -263,12 +263,33 @@ void AutoMemcpy(DeviceCtx* ctx, void* dst, const void* src, size_t sz,
   void (*func)(DeviceCtx*, void* dst, const void* src, size_t sz);
   if (src_mem_case.has_host_mem() && dst_mem_case.has_host_mem()) {
     func = &Memcpy<DeviceType::kCPU>;
-  } else {
+  } else if (src_mem_case.has_fake_dev_mem() || dst_mem_case.has_fake_dev_mem()) {
+    func = &Memcpy<DeviceType::kFAKEDEVICE>;
+  } else if (src_mem_case.has_device_cuda_mem() || dst_mem_case.has_device_cuda_mem()) {
 #ifdef WITH_CUDA
     func = &Memcpy<DeviceType::kGPU>;
 #else
     UNIMPLEMENTED();
 #endif  // WITH_CUDA
+  } else if (src_mem_case.has_device_cambricon_mem() || dst_mem_case.has_device_cambricon_mem()) {
+#ifdef WITH_CAMBRICON
+    if (src_mem_case.has_device_cambricon_mem() && !dst_mem_case.has_device_cambricon_mem()) {
+      CNRT_CHECK(cnrtMemcpyAsync(dst, (void*)(src), sz, ctx->cambricon_queue(),
+                                 CNRT_MEM_TRANS_DIR_DEV2HOST));
+    } else if (!src_mem_case.has_device_cambricon_mem()
+               && dst_mem_case.has_device_cambricon_mem()) {
+      CNRT_CHECK(cnrtMemcpyAsync(dst, (void*)(src), sz, ctx->cambricon_queue(),
+                                 CNRT_MEM_TRANS_DIR_HOST2DEV));
+    } else if (src_mem_case.has_device_cambricon_mem() && dst_mem_case.has_device_cambricon_mem()) {
+      CNRT_CHECK(cnrtMemcpyAsync(dst, (void*)(src), sz, ctx->cambricon_queue(),
+                                 CNRT_MEM_TRANS_DIR_DEV2DEV));
+    } else {
+      UNIMPLEMENTED();
+    }
+    return;
+#else
+    UNIMPLEMENTED();
+#endif  // WITH_CAMBRICON
   }
   func(ctx, dst, src, sz);
 }
@@ -283,21 +304,6 @@ void SyncAutoMemcpy(DeviceCtx* ctx, void* dst, const void* src, size_t sz,
     UNIMPLEMENTED();
 #endif  // WITH_CUDA
   }
-}
-
-void AutoMemset(DeviceCtx* ctx, void* dst, const char value, size_t sz,
-                const MemoryCase& dst_mem_case) {
-  void (*func)(DeviceCtx*, void* dst, const char value, size_t sz);
-  if (dst_mem_case.has_host_mem()) {
-    func = &Memset<DeviceType::kCPU>;
-  } else {
-#ifdef WITH_CUDA
-    func = &Memset<DeviceType::kGPU>;
-#else
-    UNIMPLEMENTED();
-#endif  // WITH_CUDA
-  }
-  func(ctx, dst, value, sz);
 }
 
 #define KU_IF_METHOD                     \
@@ -568,8 +574,6 @@ KU_INTEGRAL_METHOD InitializeWithConf(DeviceCtx* ctx, const InitializerConf& ini
     RandomIntUniformInitializer<T>(initializer_conf.random_uniform_int_conf(), random_seed, blob);
   } else if (initializer_conf.has_int_range_conf()) {
     IntSequenceInitializer<T>(initializer_conf.int_range_conf(), random_seed, blob);
-  } else if (initializer_conf.has_empty_conf()) {
-    EmptyInitializer<T>();
   } else {
     UNIMPLEMENTED();
   }

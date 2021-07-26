@@ -115,6 +115,10 @@ class Kernel {
   // TODO(niuchong) : rename ForwardDataContent to ForwardBody
   virtual void ForwardDataContent(const KernelCtx& ctx,
                                   std::function<Blob*(const std::string&)> BnInOp2Blob) const = 0;
+  virtual void ForwardPackedHeader(const KernelCtx& ctx,
+                                   std::function<Blob*(const std::string&)> BnInOp2Blob) const {
+    UNIMPLEMENTED();
+  }
   virtual bool IsStateless() const { return false; }
   virtual const PbMessage& GetCustomizedOpConf() const { UNIMPLEMENTED(); }
   virtual const PbMessage& GetCustomizedKernelConf() const { UNIMPLEMENTED(); }
@@ -136,6 +140,11 @@ class KernelIf : public Kernel {
  protected:
   KernelIf() = default;
 
+  virtual void ForwardPackedHeader(
+      const KernelCtx& ctx, std::function<Blob*(const std::string&)> BnInOp2Blob) const override {
+    CopyField(ctx.device_ctx, BnInOp2Blob, op_attribute().input_bns(), op_attribute().output_bns(),
+              &Blob::CopyHeaderFrom);
+  }
   void CopyField(DeviceCtx* ctx, std::function<Blob*(const std::string&)> BnInOp2Blob,
                  const Blob* from_blob, const PbRpf<std::string>& to_bns,
                  void (Blob::*Copy)(DeviceCtx*, const Blob*)) const {
@@ -172,6 +181,14 @@ std::unique_ptr<const Kernel> ConstructKernel(const JobDesc* job_desc, const Ker
 
 }  // namespace oneflow
 
+#ifdef WITH_CAMBRICON
+#define CAMBRICON_TUPLE_SEQ OF_PP_MAKE_TUPLE_SEQ(DeviceType::kCambricon)
+#else
+#define CAMBRICON_TUPLE_SEQ
+#endif
+
+#define FAKE_DEV_TUPLE_SEQ OF_PP_MAKE_TUPLE_SEQ(DeviceType::kFAKEDEVICE)
+
 #define MAKE_KERNEL_CREATOR_ENTRY(kernel_class, device_type, data_type_pair) \
   {GetHashKey(device_type, OF_PP_PAIR_SECOND(data_type_pair)),               \
    []() { return new kernel_class<device_type, OF_PP_PAIR_FIRST(data_type_pair)>(); }},
@@ -191,6 +208,22 @@ std::unique_ptr<const Kernel> ConstructKernel(const JobDesc* job_desc, const Ker
   REGISTER_KERNEL_CREATOR(op_type_case, OF_PP_CAT(CreateKernel, __LINE__));                  \
   }
 
+#define ADD_DEFAULT_KERNEL_CREATOR_FAKE(op_type_case, kernel_class, data_type_seq)               \
+  namespace {                                                                                    \
+                                                                                                 \
+  Kernel* OF_PP_CAT(CreateKernel, __LINE__)(const KernelConf& kernel_conf) {                     \
+    static const HashMap<std::string, std::function<Kernel*()>> creators = {                     \
+        OF_PP_SEQ_PRODUCT_FOR_EACH_TUPLE(MAKE_KERNEL_CREATOR_ENTRY, (kernel_class),              \
+                                         DEVICE_TYPE_SEQ FAKE_DEV_TUPLE_SEQ CAMBRICON_TUPLE_SEQ, \
+                                         data_type_seq)};                                        \
+    DeviceType device_type =                                                                     \
+        CHECK_JUST(DeviceType4DeviceTag(kernel_conf.op_attribute().op_conf().device_tag()));     \
+    return creators.at(GetHashKey(device_type, kernel_conf.data_type()))();                      \
+  }                                                                                              \
+                                                                                                 \
+  REGISTER_KERNEL_CREATOR(op_type_case, OF_PP_CAT(CreateKernel, __LINE__));                      \
+  }
+
 #define MAKE_DEVICE_TYPE_KERNEL_CREATOR_ENTRY(kernel_class, device_type) \
   {device_type, []() { return new kernel_class<device_type>(); }},
 
@@ -207,6 +240,22 @@ std::unique_ptr<const Kernel> ConstructKernel(const JobDesc* job_desc, const Ker
   }                                                                                             \
                                                                                                 \
   REGISTER_KERNEL_CREATOR(op_type_case, OF_PP_CAT(CreateKernel, __LINE__));                     \
+  }
+
+#define ADD_DEVICE_TYPE_KERNEL_CREATOR_INCLUDING_FAKE(op_type_case, kernel_class)                \
+  namespace {                                                                                    \
+                                                                                                 \
+  Kernel* OF_PP_CAT(CreateKernel, __LINE__)(const KernelConf& kernel_conf) {                     \
+    static const HashMap<int, std::function<Kernel*()>> creators = {                             \
+        OF_PP_SEQ_PRODUCT_FOR_EACH_TUPLE(                                                        \
+            MAKE_DEVICE_TYPE_KERNEL_CREATOR_ENTRY, (kernel_class),                               \
+            DEVICE_TYPE_SEQ OF_PP_MAKE_TUPLE_SEQ(DeviceType::kFAKEDEVICE) CAMBRICON_TUPLE_SEQ)}; \
+    DeviceType device_type =                                                                     \
+        CHECK_JUST(DeviceType4DeviceTag(kernel_conf.op_attribute().op_conf().device_tag()));     \
+    return creators.at(device_type)();                                                           \
+  }                                                                                              \
+                                                                                                 \
+  REGISTER_KERNEL_CREATOR(op_type_case, OF_PP_CAT(CreateKernel, __LINE__));                      \
   }
 
 #define MAKE_CPU_KERNEL_CREATOR_ENTRY(kernel_class, data_type_pair) \

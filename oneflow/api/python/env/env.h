@@ -26,6 +26,10 @@ limitations under the License.
 #include "oneflow/core/job/env_global_objects_scope.h"
 #include "oneflow/core/control/global_process_ctx.h"
 
+#ifdef WITH_CAMBRICON
+#include "cnrt.h"
+#endif
+
 namespace oneflow {
 
 inline Maybe<std::string> CurrentResource() {

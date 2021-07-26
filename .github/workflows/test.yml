@@ -166,7 +166,7 @@ jobs:
     name: Wait for GPU slots
     runs-on: [self-hosted, scheduler]
     needs: [build]
-    if: github.event.pull_request.draft == false && github.base_ref == 'master' && contains(github.event.pull_request.requested_reviewers.*.login, 'oneflow-ci-bot')
+    if: github.event.pull_request.draft == false && (github.base_ref == 'master' || github.base_ref == 'cambricon') && contains(github.event.pull_request.requested_reviewers.*.login, 'oneflow-ci-bot')
     steps:
       - name: Check if secrets accessible
         env:
@@ -189,7 +189,7 @@ jobs:
     needs: [check_license_and_format, mirror_third_party, cancel_previous]
     continue-on-error: ${{ matrix.allow_fail }}
     runs-on: ${{ matrix.os }}
-    if: github.event.pull_request.draft == false && github.base_ref == 'master' && contains(github.event.pull_request.requested_reviewers.*.login, 'oneflow-ci-bot') && contains(github.event.pull_request.labels.*.name, 'fmt-only') == false
+    if: github.event.pull_request.draft == false && (github.base_ref == 'master' || github.base_ref == 'cambricon') && contains(github.event.pull_request.requested_reviewers.*.login, 'oneflow-ci-bot') && contains(github.event.pull_request.labels.*.name, 'fmt-only') == false
     strategy:
       max-parallel: 5
       matrix:
@@ -350,7 +350,7 @@ jobs:
     needs: [build, wait_for_gpu_slot]
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.allow_fail }}
-    if: github.event.pull_request.draft == false && github.base_ref == 'master' && contains(github.event.pull_request.requested_reviewers.*.login, 'oneflow-ci-bot')
+    if: github.event.pull_request.draft == false && (github.base_ref == 'master' || github.base_ref == 'cambricon') && contains(github.event.pull_request.requested_reviewers.*.login, 'oneflow-ci-bot')
     strategy:
       max-parallel: 5
       matrix:

@@ -1,12 +1,9 @@
 /*
 Copyright 2020 The OneFlow Authors. All rights reserved.
-
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
-
     http://www.apache.org/licenses/LICENSE-2.0
-
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -37,12 +34,21 @@ bool ExecNode::TryBindBnWithOneOfTheRegsts(const std::string& bn,
                                            const std::list<std::shared_ptr<RegstDesc>>& regsts) {
   const LogicalBlobId& lbi = op()->BnInOp2Lbi(bn);
   bool has_binded = false;
+  LOG(INFO) << "start";
   for (std::shared_ptr<RegstDesc> regst : regsts) {
+    LOG(INFO) << lbi.DebugString();
+    LOG(INFO) << "lbi in regst:";
+    regst->ForEachLbi([&regst](const LogicalBlobId& lbi) {
+      LOG(INFO) << "lbi: " << lbi.DebugString();
+      LOG(INFO) << regst->GetBlobDesc(lbi);
+    });
     if (regst->GetBlobDesc(lbi) == nullptr) { continue; }
+    LOG(INFO) << "xxxxxx";
     BindBnWithRegst(bn, regst);
     has_binded = true;
     break;
   }
+  LOG(INFO) << "end";
   return has_binded;
 }
 
@@ -72,7 +78,7 @@ void ExecNode::ToProto(const ParallelContext* parallel_ctx, ExecNodeProto* ret) 
 namespace {
 
 Maybe<void> CheckPhysicalBlobDesc(const BlobDesc& logical,
-                                  const cfg::ParallelDistribution& parallel_distribution,
+                                  const ParallelDistribution& parallel_distribution,
                                   const ParallelDesc& parallel_desc,
                                   const ParallelContext* parallel_ctx, const BlobDesc& physical) {
   CHECK_EQ_OR_RETURN(physical.shape(),
@@ -84,7 +90,7 @@ Maybe<void> CheckPhysicalBlobDesc(const BlobDesc& logical,
 Maybe<void> CheckPhysicalBlobDesc(
     const Operator& op, const PbRpf<std::string>& bns,
     const std::function<Maybe<const BlobDesc>(const std::string&)>& GetLogicalBlobDesc,
-    const cfg::ParallelDistributionSignature* parallel_distribution_signature,
+    const ParallelDistributionSignature* parallel_distribution_signature,
     const ParallelContext* parallel_ctx,
     const std::function<BlobDesc*(const std::string&)>& GetPhysicalBlobDesc) {
   const std::shared_ptr<const ParallelDesc> op_parallel_desc = CHECK_JUST(op.GetOpParallelDesc());
@@ -109,25 +115,25 @@ Maybe<void> CheckPhysicalBlobDesc(
 void ExecNode::InferBlobDescs(const ParallelContext* parallel_ctx) {
   auto GetBlobDesc4BnInOp = GetBlobDesc4BnInOpFunc();
   const OpNode* op_node = Global<OpGraph>::Get()->OpNode4OpName(op()->op_name());
-  const cfg::ParallelDistributionSignature* parallel_distribution_signature = nullptr;
+  const ParallelDistributionSignature* parallel_distribution_signature = nullptr;
   if (op_node != nullptr) {
     parallel_distribution_signature = &op_node->parallel_distribution_signature();
   }
 
   if (op_node != nullptr && parallel_ctx->parallel_num() > 1
       && parallel_distribution_signature != nullptr) {
-    CHECK_JUST(CheckPhysicalBlobDesc(
+    CheckPhysicalBlobDesc(
         *op(), op()->input_bns(),
         std::bind(&Operator::GetLogicalBlobDesc4Ibn, op().get(), std::placeholders::_1),
-        parallel_distribution_signature, parallel_ctx, GetBlobDesc4BnInOp));
+        parallel_distribution_signature, parallel_ctx, GetBlobDesc4BnInOp);
   }
   CHECK_JUST(op_->InferBlobDescsIf(GetBlobDesc4BnInOp, parallel_ctx, &GlobalJobDesc()));
   if (op_node != nullptr && parallel_ctx->parallel_num() > 1
       && parallel_distribution_signature != nullptr) {
-    CHECK_JUST(CheckPhysicalBlobDesc(
+    CheckPhysicalBlobDesc(
         *op(), op()->output_bns(),
         std::bind(&Operator::GetLogicalBlobDesc4Obn, op().get(), std::placeholders::_1),
-        parallel_distribution_signature, parallel_ctx, GetBlobDesc4BnInOp));
+        parallel_distribution_signature, parallel_ctx, GetBlobDesc4BnInOp);
   }
   CHECK_JUST(op_->InferInplaceObn2IbnIf(&mut_inplace_obn2ibn_, &con_inplace_obn2ibn_,
                                         GetBlobDesc4BnInOp, parallel_ctx));

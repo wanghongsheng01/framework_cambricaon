@@ -17,6 +17,12 @@ limitations under the License.
 #define ONEFLOW_CORE_DEVICE_DEVICE_CONTEXT_H_
 
 #include "oneflow/core/device/cuda_util.h"
+
+#ifdef WITH_CAMBRICON
+#include "cnrt.h"
+#include "cnnl.h"
+#endif  // WITH_CAMBRICON
+
 #include "oneflow/core/common/auto_registration_factory.h"
 
 namespace oneflow {
@@ -31,6 +37,11 @@ class DeviceCtx {
  public:
   OF_DISALLOW_COPY_AND_MOVE(DeviceCtx);
   virtual ~DeviceCtx() = default;
+
+#ifdef WITH_CAMBRICON
+  virtual const cnnlHandle_t& cambricon_handle() const { UNIMPLEMENTED(); }
+  virtual const cnrtQueue_t& cambricon_queue() const { UNIMPLEMENTED(); }
+#endif  // WITH_CAMBRICON
 
 #ifdef WITH_CUDA
   virtual const cudaStream_t& cuda_stream() const { UNIMPLEMENTED(); }

@@ -1,12 +1,9 @@
 /*
 Copyright 2020 The OneFlow Authors. All rights reserved.
-
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
-
     http://www.apache.org/licenses/LICENSE-2.0
-
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -16,11 +13,11 @@ limitations under the License.
 #ifndef ONEFLOW_CORE_GRAPH_COPY_TASK_NODE_H_
 #define ONEFLOW_CORE_GRAPH_COPY_TASK_NODE_H_
 
-#include "oneflow/core/graph/transport_task_node.h"
+#include "oneflow/core/graph/task_node.h"
 
 namespace oneflow {
 
-class CopyTaskNode : public TransportTaskNode {
+class CopyTaskNode : public TaskNode {
  public:
   OF_DISALLOW_COPY_AND_MOVE(CopyTaskNode);
   CopyTaskNode() = default;
@@ -45,18 +42,18 @@ class CopyHdTaskNode final : public CopyTaskNode {
 
   TaskType GetTaskType() const override { return TaskType::kCopyHd; }
 
-  void Init(CopyHdOpConf::Type, int64_t machine_id, int64_t dev_phy_id, const LogicalBlobId& lbi);
+  void Init(CopyHdOpConf::Type, int64_t machine_id, DeviceType dev_type, int64_t dev_phy_id);
 
   CopyHdOpConf::Type copy_type() const { return copy_type_; }
   MemZoneId MemZoneId121() const override {
     if (copy_type_ == CopyHdOpConf::H2D) {
       return TaskNode::MemZoneId121();
     } else if (copy_type_ == CopyHdOpConf::D2H) {
-      return GetNodeCPUMemZoneId(this->machine_id());
+      return MemZoneId(DeviceType::kCPU, 0);
     } else {
       UNIMPLEMENTED();
     }
-    return kInvalidMemZoneId;
+    return MemZoneId(DeviceType::kCPU, 0);
   }
 
  private:
@@ -74,9 +71,11 @@ class CopyCommNetTaskNode final : public CopyTaskNode {
 
   TaskType GetTaskType() const override { return TaskType::kCopyCommNet; }
 
-  void Init(int64_t machine_id, const LogicalBlobId& lbi);
+  void Init(int64_t machine_id);
 
  private:
+  void InitProducedRegstMemCase(MemoryCase*) override;
+  void PinConsumedRegstMemCase(MemoryCase*) override;
   OperatorConf NewCopyOpConf() override;
 };
 

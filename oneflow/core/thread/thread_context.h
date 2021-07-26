@@ -17,6 +17,7 @@ limitations under the License.
 #define ONEFLOW_CORE_THREAD_THREAD_CONTEXT_H_
 
 #include "oneflow/core/device/cuda_stream_handle.h"
+#include "oneflow/core/device/cambricon_queue_handle.h"
 
 namespace oneflow {
 
@@ -24,6 +25,11 @@ struct ThreadCtx {
 #ifdef WITH_CUDA
   std::unique_ptr<CudaStreamHandle> g_cuda_stream;
   Channel<CudaCBEvent>* cb_event_chan;
+#endif
+
+#ifdef WITH_CAMBRICON
+  std::unique_ptr<CambriconQueueHandle> g_cambricon_queue;
+  Channel<CambriconCBNotifier>* cb_notifier_chan;
 #endif
 };
 

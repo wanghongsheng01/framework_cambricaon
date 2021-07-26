@@ -22,6 +22,7 @@ limitations under the License.
 #include "oneflow/core/job/placement.pb.h"
 #include "oneflow/core/operator/op_conf.pb.h"
 #include "oneflow/core/register/logical_blob_id.pb.h"
+#include "oneflow/core/register/runtime_blob_desc.h"
 
 namespace oneflow {
 
@@ -40,6 +41,8 @@ std::string MakeInputOpConf(const std::string& input_op_name, const int64_t scop
 std::string MakeOutputOpConf(const std::string& output_op_name, const int64_t scope_sym_id,
                              const LogicalBlobId& lbi, OperatorConf* output_op_conf) {
   output_op_conf->set_name(output_op_name);
+  // NOTE: return op is best to be run on cpu by this we could only implement cpu return kernel
+  output_op_conf->set_device_tag("cpu");
   output_op_conf->set_scope_symbol_id(scope_sym_id);
   auto* return_conf = output_op_conf->mutable_return_conf();
   return_conf->set_in(GenLogicalBlobName(lbi));
@@ -122,7 +125,7 @@ Maybe<void> AddInputOutputOpsPass::Apply(const OpGraph& op_graph, JobBuilder* jo
   }
 
   HashMap<std::string, OperatorConf> io_op_name2op_conf;
-  HashMap<std::string, const ParallelConf*> io_op_name2parallel_conf;
+  HashMap<std::string, ParallelConf> io_op_name2parallel_conf;
   HashSet<std::string> input_consumer_op_names;
   std::vector<OperatorConf> input_consumer_op_confs;
   for (const auto& pair : job_sig.inputs()) {
@@ -135,7 +138,7 @@ Maybe<void> AddInputOutputOpsPass::Apply(const OpGraph& op_graph, JobBuilder* jo
     std::string input_lbn = MakeInputOpConf(input_name, scope_sym_id, input_def.blob_conf(),
                                             &io_op_name2op_conf[input_name]);
     CHECK_OR_RETURN(
-        io_op_name2parallel_conf.emplace(input_name, &op_node->parallel_desc().parallel_conf())
+        io_op_name2parallel_conf.emplace(input_name, op_node->parallel_desc().parallel_conf())
             .second);
 
     for (const OpEdge* out_edge : op_node->out_edges()) {
@@ -159,14 +162,14 @@ Maybe<void> AddInputOutputOpsPass::Apply(const OpGraph& op_graph, JobBuilder* jo
     CHECK_OR_RETURN(io_op_name2op_conf.emplace(output_name, OperatorConf()).second);
     int64_t scope_sym_id = inferface_lbi2scope_sym_id.at(output_def.lbi());
     MakeOutputOpConf(output_name, scope_sym_id, output_def.lbi(), &io_op_name2op_conf[output_name]);
-    CHECK_OR_RETURN(
-        io_op_name2parallel_conf.emplace(output_name, &op_node->parallel_desc().parallel_conf())
-            .second);
+    // NOTE: Ouput op (return op) is preferably on host
+    ParallelConf host_parallel_conf(op_node->parallel_desc().parallel_conf());
+    host_parallel_conf.set_device_tag("cpu");
+    CHECK_OR_RETURN(io_op_name2parallel_conf.emplace(output_name, host_parallel_conf).second);
   }
 
   for (const auto& pair : io_op_name2op_conf) {
-    const auto* parallel_conf = io_op_name2parallel_conf.at(pair.first);
-    job_builder->AddOps(*parallel_conf, {pair.second});
+    job_builder->AddOps(io_op_name2parallel_conf.at(pair.first), {pair.second});
   }
   job_builder->MutOpsOnlyOnce(input_consumer_op_confs);
   job_builder->DelOps(drop_op_names);

@@ -18,6 +18,8 @@ limitations under the License.
 #include "oneflow/core/thread/thread_manager.h"
 #include "oneflow/core/job/runtime_job_descs.h"
 #include "oneflow/core/control/global_process_ctx.h"
+#include "oneflow/core/device/cambricon_device_context.h"
+#include "oneflow/core/device/fake_device_device_context.h"
 
 namespace oneflow {
 

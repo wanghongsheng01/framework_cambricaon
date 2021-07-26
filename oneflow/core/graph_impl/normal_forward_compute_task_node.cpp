@@ -14,6 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 #include "oneflow/core/graph/normal_forward_compute_task_node.h"
+
+#include "oneflow/core/device/fake_device_stream_index.h"
+#include "oneflow/core/device/cambricon_device_stream_index.h"
 #include "oneflow/core/framework/user_op_registry_manager.h"
 #include "oneflow/core/graph/task_graph.h"
 #include "oneflow/core/operator/variable_op.h"
