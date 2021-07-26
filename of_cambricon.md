@@ -2202,45 +2202,1231 @@ if (src_mem_case.has_host_mem() && dst_mem_case.has_host_mem()) {
 ```
 
 54. oneflow/core/kernel/matmul_kernel_mlu.cpp
+```.cpp
+#ifdef WITH_CAMBRICON
+
+#include "oneflow/core/framework/framework.h"
+#include "oneflow/core/kernel/new_kernel_util.h"
+#include "oneflow/core/kernel/mlu_tools.h"
+#include "cnrt.h"
+#include "cnnl.h"
+#include <stdio.h>
+
+namespace oneflow {
+
+typedef struct Matmul_ {
+  cnnlTensorDescriptor_t a_desc = nullptr;
+  cnnlTensorDescriptor_t b_desc = nullptr;
+  cnnlTensorDescriptor_t c_desc = nullptr;
+} Matmul;
+
+template<DeviceType device_type, CamDataType T>
+class MatmulKernelCambricon final : public user_op::OpKernel {
+ public:
+  MatmulKernelCambricon() = default;
+  ~MatmulKernelCambricon() = default;
+
+ private:
+  void Compute(user_op::KernelComputeContext* ctx) const override {
+    const user_op::Tensor* a = ctx->Tensor4ArgNameAndIndex("a", 0);
+    const user_op::Tensor* b = ctx->Tensor4ArgNameAndIndex("b", 0);
+    bool transpose_a = ctx->Attr<bool>("transpose_a");
+    bool transpose_b = ctx->Attr<bool>("transpose_b");
+    user_op::Tensor* c = ctx->Tensor4ArgNameAndIndex("out", 0);
+
+    void* a_ptr = (void*)a->dptr();
+    void* b_ptr = (void*)b->dptr();
+    void* c_ptr = (void*)c->dptr();
+
+    Matmul matmul;
+    MatMulType datainfo;
+    datainfo.input_dtype = convert(CamDataType::kINT8);
+    datainfo.output_dtype = convert(T);
+
+    CHECK_EQ(a->shape().NumAxes(), 2);
+    CHECK_EQ(b->shape().NumAxes(), 2);
+
+    set_tensor_desc_matmul(matmul.a_desc, a->shape().At(0), a->shape().At(1), CNNL_DTYPE_INT8,
+                           datainfo.layout);
+
+    set_tensor_desc_matmul(matmul.b_desc, b->shape().At(0), b->shape().At(1), CNNL_DTYPE_INT8,
+                           datainfo.layout);
+
+    set_tensor_desc_matmul(matmul.c_desc, c->shape().At(0), c->shape().At(1), datainfo.output_dtype,
+                           datainfo.layout);
+    // cast a
+    void* a_cast;
+    int a_size = a->shape().elem_cnt();
+    CNRT_CHECK(cnrtMalloc(&(a_cast), a_size));
+    CNRT_CHECK(cnrtMemset(a_cast, 0, a_size));
+
+    void* a_pos = nullptr;
+    void* a_scale = nullptr;
+    CNRT_CHECK(cnrtMalloc((void**)&a_pos, sizeof(int32_t)));
+    CNRT_CHECK(cnrtMalloc((void**)&a_scale, sizeof(float)));
+    size_t a_workspace_size = 0;
+    void* a_workspace = nullptr;
+    cnnlTensorDescriptor_t a_desc = nullptr;
+    set_tensor_desc_matmul(a_desc, a->shape().At(0), a->shape().At(1), CNNL_DTYPE_FLOAT,
+                           datainfo.layout);
+
+    CNNL_CHECK(cnnlGetQuantifyOnlineWorkspaceSize(ctx->device_ctx()->cambricon_handle(), a_desc,
+                                                  &a_workspace_size));
+    if (a_workspace_size != 0) {
+      CNRT_CHECK(cnrtMalloc((void**)&a_workspace, a_workspace_size));
+      CNRT_CHECK(cnrtMemset(a_workspace, 0, a_workspace_size));
+    }
+    cnnlQuantifyOnline(ctx->device_ctx()->cambricon_handle(), false, a_desc, a_ptr, a_workspace,
+                       a_workspace_size, a_pos, a_scale, matmul.a_desc, a_cast);
+    ctx->device_ctx()->SyncDevice();
+    int a_pos_ = 0;
+    float a_scale_ = 0;
+    CNRT_CHECK(cnrtMemcpy(&a_pos_, a_pos, sizeof(int32_t), CNRT_MEM_TRANS_DIR_DEV2HOST));
+    CNRT_CHECK(cnrtMemcpy(&a_scale_, a_scale, sizeof(float), CNRT_MEM_TRANS_DIR_DEV2HOST));
+    cnnlSetTensorDescriptorPositionAndScale(matmul.a_desc, a_pos_, a_scale_);
+
+    // cast b
+    void* b_cast;
+    int b_size = b->shape().elem_cnt();
+    CNRT_CHECK(cnrtMalloc(&(b_cast), b_size));
+
+    void* b_pos = nullptr;
+    void* b_scale = nullptr;
+    CNRT_CHECK(cnrtMalloc((void**)&b_pos, sizeof(int32_t)));
+    CNRT_CHECK(cnrtMalloc((void**)&b_scale, sizeof(float)));
+    size_t b_workspace_size = 0;
+    void* b_workspace = nullptr;
+    cnnlTensorDescriptor_t b_desc = nullptr;
+    set_tensor_desc_matmul(b_desc, b->shape().At(0), b->shape().At(1), CNNL_DTYPE_FLOAT,
+                           datainfo.layout);
+
+    CNNL_CHECK(cnnlGetQuantifyOnlineWorkspaceSize(ctx->device_ctx()->cambricon_handle(), b_desc,
+                                                  &b_workspace_size));
+    if (b_workspace_size != 0) {
+      CNRT_CHECK(cnrtMalloc((void**)&b_workspace, b_workspace_size));
+      CNRT_CHECK(cnrtMemset(b_workspace, 0, b_workspace_size));
+    }
+    cnnlQuantifyOnline(ctx->device_ctx()->cambricon_handle(), false, b_desc, b_ptr, b_workspace,
+                       b_workspace_size, b_pos, b_scale, matmul.b_desc, b_cast);
+    ctx->device_ctx()->SyncDevice();
+    int b_pos_ = 0;
+    float b_scale_ = 0;
+    CNRT_CHECK(cnrtMemcpy(&b_pos_, b_pos, sizeof(int32_t), CNRT_MEM_TRANS_DIR_DEV2HOST));
+    CNRT_CHECK(cnrtMemcpy(&b_scale_, b_scale, sizeof(float), CNRT_MEM_TRANS_DIR_DEV2HOST));
+    cnnlSetTensorDescriptorPositionAndScale(matmul.b_desc, b_pos_, b_scale_);
+
+    bool is_trans_a = transpose_a;
+    bool is_trans_b = transpose_b;
+    float* alpha = (float*)malloc(1 * sizeof(float));
+    alpha[0] = 1.0;
+    float* beta = (float*)malloc(1 * sizeof(float));
+    beta[0] = 0.0;
+
+    CNNL_CHECK(cnnlMatMul(ctx->device_ctx()->cambricon_handle(), is_trans_a, is_trans_b,
+                          (void*)alpha, matmul.a_desc, a_cast, matmul.b_desc, b_cast, (void*)beta,
+                          matmul.c_desc, c_ptr));
+
+    if (a_workspace != nullptr) { CNRT_CHECK(cnrtFree(a_workspace)); }
+    if (b_workspace != nullptr) { CNRT_CHECK(cnrtFree(b_workspace)); }
+    CNRT_CHECK(cnrtFree(a_pos));
+    CNRT_CHECK(cnrtFree(a_scale));
+    CNRT_CHECK(cnrtFree(b_pos));
+    CNRT_CHECK(cnrtFree(b_scale));
+    CNRT_CHECK(cnrtFree(a_cast));
+    CNRT_CHECK(cnrtFree(b_cast));
+    free(alpha);
+    free(beta);
+  }
+  bool AlwaysComputeWhenAllOutputsEmpty() const override { return false; }
+};
+
+#define REGISTER_MATMUL_KERNEL(device, dtype)              \
+  REGISTER_USER_KERNEL("matmul")                           \
+      .SetCreateFn<MatmulKernelCambricon<device, dtype>>() \
+      .SetIsMatchedHob((user_op::HobDeviceTag() == device));
+
+REGISTER_MATMUL_KERNEL(DeviceType::kCambricon, CamDataType::kFLOAT32)
+
+}  // namespace oneflow
+
+#endif
+
+```
 
 55. oneflow/core/kernel/mlu_tools.h
+```.h
+#ifndef ONEFLOW_CORE_KERNEL_MLU_TOOLS_H_
+#define ONEFLOW_CORE_KERNEL_MLU_TOOLS_H_
+
+#ifdef WITH_CAMBRICON
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <iostream>
+#include <sstream>
+#include <fstream>
+#include <random>
+#include <iomanip>
+#include <vector>
+#include <cmath>
+#include <string>
+
+#include "cnrt.h"
+#include "cnnl.h"
+
+namespace oneflow {
+
+enum CamDataType { kHALF, kFLOAT32, kINT32, kINT16, kINT8 };
+
+struct convDataType {
+  cnnlDataType_t input_dtype;
+  cnnlDataType_t weight_dtype;
+  cnnlDataType_t output_dtype;
+  cnnlTensorLayout_t layout = CNNL_LAYOUT_NHWC;
+};
+
+struct poolDataType {
+  cnnlDataType_t input_dtype;
+  cnnlDataType_t output_dtype;
+  cnnlTensorLayout_t layout = CNNL_LAYOUT_NHWC;
+};
+
+struct reluDataType {
+  cnnlDataType_t input_dtype;
+  cnnlDataType_t output_dtype;
+  cnnlTensorLayout_t layout = CNNL_LAYOUT_NHWC;
+};
+
+struct sigmoidDataType {
+  cnnlDataType_t input_dtype;
+  cnnlDataType_t output_dtype;
+  cnnlTensorLayout_t layout = CNNL_LAYOUT_NHWC;
+};
+
+struct preluDataType {
+  cnnlDataType_t input_dtype;
+  cnnlDataType_t output_dtype;
+  cnnlDataType_t alpha_dtype;
+  cnnlTensorLayout_t layout = CNNL_LAYOUT_NHWC;
+};
+
+struct BatchNormType {
+  cnnlDataType_t input_dtype;
+  cnnlDataType_t output_dtype;
+  cnnlDataType_t weight_bias_mean_var_desc_dtype;
+  cnnlTensorLayout_t layout = CNNL_LAYOUT_NHWC;
+};
+
+struct InstanceNormType {
+  cnnlDataType_t input_dtype;
+  cnnlDataType_t output_dtype;
+  cnnlDataType_t scale_bias_desc_dtype;
+  cnnlDataType_t mean_var_desc_dtype;
+  cnnlTensorLayout_t layout = CNNL_LAYOUT_NHWC;
+};
+
+struct SoftmaxType {
+  cnnlDataType_t input_dtype;
+  cnnlDataType_t output_dtype;
+  cnnlTensorLayout_t layout = CNNL_LAYOUT_NHWC;
+};
+
+struct MatMulType {
+  cnnlDataType_t input_dtype;
+  cnnlDataType_t output_dtype;
+  cnnlTensorLayout_t layout = CNNL_LAYOUT_NHWC;
+};
+
+struct TransposeType {
+  cnnlDataType_t input_dtype;
+  cnnlDataType_t output_dtype;
+  cnnlTensorLayout_t layout = CNNL_LAYOUT_NHWC;
+};
+
+struct InterpType {
+  cnnlDataType_t input_dtype;
+  cnnlDataType_t output_dtype;
+  cnnlTensorLayout_t layout = CNNL_LAYOUT_NHWC;
+};
+
+struct AddType {
+  cnnlDataType_t input_dtype;
+  cnnlDataType_t output_dtype;
+  cnnlTensorLayout_t layout = CNNL_LAYOUT_NHWC;
+};
+
+struct ConcatType {
+  cnnlDataType_t input_dtype;
+  cnnlDataType_t output_dtype;
+  cnnlTensorLayout_t layout = CNNL_LAYOUT_NHWC;
+};
+
+struct BiasAddType {
+  cnnlDataType_t a_dtype;
+  cnnlDataType_t b_dtype;
+  cnnlTensorLayout_t layout = CNNL_LAYOUT_NHWC;
+};
+
+size_t dataSize(cnnlDataType_t dtype);
+
+void set_tensor_desc(cnnlTensorDescriptor_t& desc, size_t ndim, const int* dim,
+                     cnnlDataType_t dtype, cnnlTensorLayout_t layout);
+
+void set_tensor_desc(cnnlTensorDescriptor_t& desc, int dim_n, int dim_h, int dim_w, int dim_c,
+                     cnnlDataType_t dtype, cnnlTensorLayout_t layout);
+
+void set_tensor_desc_3d(cnnlTensorDescriptor_t& desc, int dim_0, int dim_1, int dim_2,
+                        cnnlDataType_t dtype, cnnlTensorLayout_t layout);
+
+void set_tensor_desc_batchnorm(cnnlTensorDescriptor_t& desc, int dim_c, cnnlDataType_t dtype,
+                               cnnlTensorLayout_t layout);
+
+void set_tensor_desc_softmax(cnnlTensorDescriptor_t& desc, int dim_n, int dim_c,
+                             cnnlDataType_t dtype, cnnlTensorLayout_t layout);
+
+void set_tensor_desc_matmul(cnnlTensorDescriptor_t& desc, int dim_n, int dim_c,
+                            cnnlDataType_t dtype, cnnlTensorLayout_t layout);
+
+void set_tensor_desc_biasadd(cnnlTensorDescriptor_t& desc, int dim_c, cnnlDataType_t dtype,
+                             cnnlTensorLayout_t layout);
+
+cnrtDataType_t convertCnnlDtypeToCnrt(cnnlDataType_t dtype);
+
+void getPosition(float* input, size_t num, cnnlDataType_t datatype, int* position);
+
+void getPositionAndScale(float* input, size_t size, cnnlDataType_t dtype, int* pos, float* scale);
+
+void cast_data(float* src_data, cnnlDataType_t src_dtype, char* dst_data, cnnlDataType_t dst_dtype,
+               size_t size, int* pos, float* scale, int* offset, int quant_mode);
+
+cnnlDataType_t convert(CamDataType type);
+
+}  // namespace oneflow
+
+#endif
+
+#endif  // ONEFLOW_CORE_KERNEL_MLU_TOOLS_H_
+
+```
+
 56. oneflow/core/kernel/mlu_tools.cpp
+```.cpp
+/*
+Copyright 2020 The OneFlow Authors. All rights reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+#ifdef WITH_CAMBRICON
+
+#include <stdexcept>
+#include "oneflow/core/kernel/mlu_tools.h"
+
+namespace oneflow {
+
+size_t dataSize(cnnlDataType_t dtype) {
+  switch (dtype) {
+    case CNNL_DTYPE_HALF: return 2;
+    case CNNL_DTYPE_FLOAT: return 4;
+    case CNNL_DTYPE_INT8: return 1;
+    case CNNL_DTYPE_INT16: return 2;
+    case CNNL_DTYPE_INT32: return 4;
+    default: throw std::runtime_error("unsupport data  dtype\n");
+  }
+}
+
+cnnlDataType_t convert(CamDataType type) {
+  int v = 0;
+  if (type == kHALF) {
+    v = 1;
+  } else if (type == kFLOAT32) {
+    v = 2;
+  } else if (type == kINT8) {
+    v = 3;
+  } else if (type == kINT16) {
+    v = 4;
+  }
+  return (cnnlDataType_t)v;
+}
+
+void set_tensor_desc(cnnlTensorDescriptor_t& desc, size_t ndim, const int* dim,
+                     cnnlDataType_t dtype, cnnlTensorLayout_t layout) {
+  CNNL_CHECK(cnnlCreateTensorDescriptor(&desc));
+  CNNL_CHECK(cnnlSetTensorDescriptor(desc, layout, dtype, static_cast<int>(ndim), dim));
+}
+
+void set_tensor_desc(cnnlTensorDescriptor_t& desc, int dim_n, int dim_h, int dim_w, int dim_c,
+                     cnnlDataType_t dtype, cnnlTensorLayout_t layout) {
+  int dim[4];
+  dim[0] = dim_n;
+  dim[1] = dim_h;
+  dim[2] = dim_w;
+  dim[3] = dim_c;
+  CNNL_CHECK(cnnlCreateTensorDescriptor(&desc));
+  CNNL_CHECK(cnnlSetTensorDescriptor(desc, layout, dtype, 4, dim));
+}
+
+void set_tensor_desc_3d(cnnlTensorDescriptor_t& desc, int dim_0, int dim_1, int dim_2,
+                        cnnlDataType_t dtype, cnnlTensorLayout_t layout) {
+  int dim[3];
+  dim[0] = dim_0;
+  dim[1] = dim_1;
+  dim[2] = dim_2;
+  CNNL_CHECK(cnnlCreateTensorDescriptor(&desc));
+  CNNL_CHECK(cnnlSetTensorDescriptor(desc, layout, dtype, 3, dim));
+}
+
+void set_tensor_desc_batchnorm(cnnlTensorDescriptor_t& desc, int dim_c, cnnlDataType_t dtype,
+                               cnnlTensorLayout_t layout) {
+  int dim[1];
+  dim[0] = dim_c;
+  CNNL_CHECK(cnnlCreateTensorDescriptor(&desc));
+  CNNL_CHECK(cnnlSetTensorDescriptor(desc, layout, dtype, 1, dim));
+}
+
+void set_tensor_desc_softmax(cnnlTensorDescriptor_t& desc, int dim_n, int dim_c,
+                             cnnlDataType_t dtype, cnnlTensorLayout_t layout) {
+  int dim[3];
+  dim[0] = dim_n;
+  dim[1] = 1;
+  dim[2] = dim_c;
+  CNNL_CHECK(cnnlCreateTensorDescriptor(&desc));
+  CNNL_CHECK(cnnlSetTensorDescriptor(desc, layout, dtype, 3, dim));
+}
+
+void set_tensor_desc_matmul(cnnlTensorDescriptor_t& desc, int dim_n, int dim_c,
+                            cnnlDataType_t dtype, cnnlTensorLayout_t layout) {
+  int dim[2];
+  dim[0] = dim_n;
+  dim[1] = dim_c;
+  CNNL_CHECK(cnnlCreateTensorDescriptor(&desc));
+  CNNL_CHECK(cnnlSetTensorDescriptor(desc, layout, dtype, 2, dim));
+}
+
+void set_tensor_desc_biasadd(cnnlTensorDescriptor_t& desc, int dim_c, cnnlDataType_t dtype,
+                             cnnlTensorLayout_t layout) {
+  int dim[1];
+  dim[0] = dim_c;
+  CNNL_CHECK(cnnlCreateTensorDescriptor(&desc));
+  CNNL_CHECK(cnnlSetTensorDescriptor(desc, layout, dtype, 1, dim));
+}
+
+cnrtDataType_t convertCnnlDtypeToCnrt(cnnlDataType_t dtype) {
+  switch (dtype) {
+    case CNNL_DTYPE_HALF: return CNRT_FLOAT16;
+    case CNNL_DTYPE_FLOAT: return CNRT_FLOAT32;
+    case CNNL_DTYPE_INT8: return CNRT_INT8;
+    case CNNL_DTYPE_INT16: return CNRT_INT16;
+    case CNNL_DTYPE_INT32: return CNRT_INT32;
+    case CNNL_DTYPE_BOOL: return CNRT_BOOL;
+    case CNNL_DTYPE_UINT8: return CNRT_UINT8;
+    default: throw std::runtime_error("unsupport data dtype\n");
+  }
+}
+
+void getPosition(float* input, size_t num, cnnlDataType_t datatype, int* position) {
+  if (input == nullptr || position == nullptr || num <= 0) { printf("invalid input paramter!\n"); }
+
+  int bitwidth = 8;
+  if (datatype == CNNL_DTYPE_INT8) {
+    bitwidth = 8;
+  } else if (datatype == CNNL_DTYPE_INT16) {
+    bitwidth = 16;
+  } else {
+    printf("unsuport quant datatype!\n");
+  }
+  // Formula: int8 int16,  position = ceil(log2(absmax/(2^(bitwidth-1)-1)))
+  float absmax = std::fabs(input[0]);
+  for (size_t index = 0; index < num; ++index) {
+    if (std::fabs(input[index]) > absmax) absmax = std::fabs(input[index]);
+  }
+  if (absmax == 0) {
+    *position = 0;
+  } else {
+    *position = static_cast<int>(std::floor(std::log2(absmax)) - (bitwidth - 2));
+  }
+}
+
+void getPositionAndScale(float* input, size_t size, cnnlDataType_t dtype, int* position,
+                         float* scale, int mode) {
+  if (input == NULL || size == 0 || position == NULL || scale == NULL) {
+    printf("invalid input paramter!");
+  }
+
+  int bitwidth = 8;
+  if (dtype == CNNL_DTYPE_INT8) {
+    bitwidth = 8;
+  } else if (dtype == CNNL_DTYPE_INT16) {
+    bitwidth = 16;
+  } else {
+    printf("unsupport input data type!");
+    return;
+  }
+
+  int scale_var = std::pow(2, bitwidth - 1) - 1;
+  float max_data = std::fabs(input[0]);
+  for (size_t index = 0; index < size; ++index) {
+    if (std::fabs(input[index]) > max_data) max_data = std::fabs(input[index]);
+  }
+  if (max_data == 0) {
+    *position = 0;
+    *scale = 1.0;
+  } else {
+    if (mode == 0) {
+      *position = static_cast<int>(std::floor(std::log2(max_data)) - (bitwidth - 2));
+      *scale = static_cast<float>(std::pow(2, *position) * scale_var / max_data);
+    } else {
+      *position = static_cast<int>(std::floor(std::log2(max_data)) - (bitwidth - 2));
+      *scale = 1.0;
+    }
+  }
+}
+
+void cast_data(float* src_data, cnnlDataType_t src_dtype, char* dst_data, cnnlDataType_t dst_dtype,
+               size_t size, int* pos, float* scale, int* offset, int quant_mode) {
+  if (src_dtype == CNNL_DTYPE_FLOAT && dst_dtype == CNNL_DTYPE_FLOAT) {
+    memcpy(dst_data, src_data, size * sizeof(float));
+  } else if ((src_dtype == CNNL_DTYPE_FLOAT && dst_dtype == CNNL_DTYPE_INT8)
+             || (src_dtype == CNNL_DTYPE_FLOAT && dst_dtype == CNNL_DTYPE_INT16)) {
+    auto in_dtype = convertCnnlDtypeToCnrt(src_dtype);
+    auto out_dtype = convertCnnlDtypeToCnrt(dst_dtype);
+    // need quant
+    *pos = 0;
+    *scale = 1.0;
+    *offset = 0;
+
+    if (0 == quant_mode) {
+      getPosition(src_data, size, dst_dtype, pos);
+    } else if (1 == quant_mode) {
+      getPositionAndScale(src_data, size, dst_dtype, pos, scale, 1);
+    } else {
+      printf("This quant mode is not supported at present.");
+    }
+    cnrtQuantizedParam_t quant_param = nullptr;
+    CNRT_CHECK(cnrtCreateQuantizedParam(&quant_param, *pos, *scale, *offset));
+    CNRT_CHECK(cnrtCastDataType(src_data, in_dtype, dst_data, out_dtype, size, quant_param));
+    CNRT_CHECK(cnrtDestroyQuantizedParam(quant_param));
+  } else if ((src_dtype == CNNL_DTYPE_FLOAT && dst_dtype == CNNL_DTYPE_HALF)
+             || (src_dtype == CNNL_DTYPE_FLOAT && dst_dtype == CNNL_DTYPE_INT32)
+             || (src_dtype == CNNL_DTYPE_FLOAT && dst_dtype == CNNL_DTYPE_BOOL)) {
+    auto in_dtype = convertCnnlDtypeToCnrt(src_dtype);
+    auto out_dtype = convertCnnlDtypeToCnrt(dst_dtype);
+    CNRT_CHECK(cnrtCastDataType(src_data, in_dtype, dst_data, out_dtype, size, nullptr));
+  } else {
+    printf("This dtype is not supported.\n");
+  }
+}
+
+}  // namespace oneflow
+
+#endif
+
+```
 
 57. oneflow/core/kernel/new_kernel_util.cpp
+```.cpp
+#include "oneflow/core/framework/device_register_fakedev.h"
+
+template<>
+void Memcpy<DeviceType::kFAKEDEVICE>(DeviceCtx* ctx, void* dst, const void* src, size_t sz) {
+  if (dst == src) { return; }
+  memcpy(dst, src, sz);
+}
+
+template<>
+void Memset<DeviceType::kFAKEDEVICE>(DeviceCtx* ctx, void* dst, const char value, size_t sz) {
+  memset(dst, value, sz);
+}
+```
 
 58.  oneflow/core/kernel/new_kernel_util_mlu.cpp
+```.cpp
+#ifdef WITH_CAMBRICON
+
+#include "oneflow/core/kernel/new_kernel_util.h"
+#include "oneflow/core/memory/memory_case.pb.h"
+#include "oneflow/core/register/blob.h"
+#include "cnrt.h"
+
+namespace oneflow {
+
+template<>
+void Memset<DeviceType::kCambricon>(DeviceCtx* ctx, void* dst, const char value, size_t sz) {
+  CNRT_CHECK(cnrtMemsetD8Async(dst, value, sz, ctx->cambricon_queue()));
+}
+
+template<>
+void Memcpy<DeviceType::kCambricon>(DeviceCtx* ctx, void* dst, const void* src, size_t sz) {
+  if (dst == src) { return; }
+  ctx->SyncDevice();
+  CNRT_CHECK(cnrtMemcpy(dst, (void*)(src), sz, CNRT_MEM_TRANS_DIR_NODIR));
+}
+
+}  // namespace oneflow
+
+#endif
+```
 
 59. oneflow/core/kernel/output_kernel.cpp
+```.cpp
+ADD_DEVICE_TYPE_KERNEL_CREATOR_INCLUDING_FAKE(OperatorConf::kOutputConf, OutputKernel);
+```
 
 60. oneflow/core/kernel/softmax_kernel_mlu.cpp
+```.cpp
+#ifdef WITH_CAMBRICON
+
+#include "oneflow/core/framework/framework.h"
+#include "oneflow/core/kernel/new_kernel_util.h"
+#include "oneflow/core/kernel/mlu_tools.h"
+#include "cnrt.h"
+#include "cnnl.h"
+#include <stdio.h>
+
+namespace oneflow {
+
+namespace {
+typedef struct Softmax_ {
+  cnnlTensorDescriptor_t input_desc = nullptr;
+  cnnlTensorDescriptor_t output_desc = nullptr;
+  cnnlSoftmaxAlgorithm_t algorithm = CNNL_SOFTMAX_ACCURATE;
+  cnnlSoftmaxMode_t mode = CNNL_SOFTMAX_MODE_LOW_DIMENSION;
+  float hw_time = 0;
+} Softmax;
+
+template<DeviceType device_type>
+class SoftmaxKernelCambricon final : public user_op::OpKernel {
+ public:
+  SoftmaxKernelCambricon() = default;
+  ~SoftmaxKernelCambricon() = default;
+
+ private:
+  void Compute(user_op::KernelComputeContext* ctx) const override {
+    const user_op::Tensor* x = ctx->Tensor4ArgNameAndIndex("in", 0);
+    user_op::Tensor* y = ctx->Tensor4ArgNameAndIndex("out", 0);
+
+    Softmax softmax;
+    SoftmaxType datainfo;
+    datainfo.input_dtype = convert(CamDataType::kFLOAT32);
+    datainfo.output_dtype = convert(CamDataType::kFLOAT32);
+    CHECK_EQ(x->shape().NumAxes(), 2)
+        << "The number of axes of softmax op input shape should equal to 2!";
+    set_tensor_desc_softmax(softmax.input_desc, x->shape().At(0), x->shape().At(1),
+                            datainfo.input_dtype, datainfo.layout);
+    set_tensor_desc_softmax(softmax.output_desc, y->shape().At(0), y->shape().At(1),
+                            datainfo.output_dtype, datainfo.layout);
+
+    const void* x_ptr = (const void*)x->dptr();
+    void* y_ptr = (void*)y->dptr();
+
+    CNNL_CHECK(cnnlSoftmaxForward(ctx->device_ctx()->cambricon_handle(), softmax.algorithm,
+                                  softmax.mode, nullptr, softmax.input_desc, x_ptr, nullptr,
+                                  softmax.output_desc, y_ptr));
+  }
+  bool AlwaysComputeWhenAllOutputsEmpty() const override { return false; }
+};
+
+#define REGISTER_SOFTMAX_KERNEL(device, dtype)                                                  \
+  REGISTER_USER_KERNEL("softmax")                                                               \
+      .SetCreateFn<SoftmaxKernelCambricon<device>>()                                            \
+      .SetIsMatchedHob((user_op::HobDeviceTag() == device)                                      \
+                       & (user_op::HobDataType("in", 0) == dtype))                              \
+      .SetInplaceProposalFn([](const user_op::InferContext&,                                    \
+                               user_op::AddInplaceArgPair AddInplaceArgPairFn) -> Maybe<void> { \
+        OF_RETURN_IF_ERROR(AddInplaceArgPairFn("out", 0, "in", 0, true));                       \
+        return Maybe<void>::Ok();                                                               \
+      })
+
+REGISTER_SOFTMAX_KERNEL(DeviceType::kCambricon, DataType::kFloat);
+
+}  // namespace
+
+}  // namespace oneflow
+
+#endif
+
+```
 
 61. oneflow/core/kernel/variable_kernel.cpp 
+```.cpp
+ADD_DEFAULT_KERNEL_CREATOR_FAKE(OperatorConf::kVariableConf, VariableKernel,
+                                ARITHMETIC_DATA_TYPE_SEQ);
+```
 
 62. oneflow/core/memory/memory_allocator.cpp
+```.cpp
+#include "oneflow/core/memory/memory_fake_dev_allocator.h"
+#ifdef WITH_CAMBRICON
+#include "oneflow/core/device/mlu_util.h"
+#endif
+
+
+} else if (mem_case.has_fake_dev_mem()) {
+    ptr = FakeDevMemoryAllocatorImpl::Allocate(mem_case, size);
+  } else if (mem_case.has_device_cambricon_mem()) {
+#ifdef WITH_CAMBRICON
+    MLUCurrentDeviceGuard guard(mem_case.device_cambricon_mem().device_id());
+    CNRT_CHECK(cnrtMalloc(&ptr, size));
+#else
+    UNIMPLEMENTED();
+#endif  // WITH_CAMBRICON
+
+
+} else if (mem_case.has_fake_dev_mem()) {
+    FakeDevMemoryAllocatorImpl::Deallocate(ptr, mem_case);
+  } else if (mem_case.has_device_cambricon_mem()) {
+#ifdef WITH_CAMBRICON
+    CNRT_CHECK(cnrtFree(ptr));
+#else
+    UNIMPLEMENTED();
+#endif  // WITH_CAMBRICON
+
+
+  } else if (mem_case.has_fake_dev_mem()) {
+    memset(dptr, memset_val, size);
+  } else if (mem_case.has_device_cambricon_mem()) {
+#ifdef WITH_CAMBRICON
+    CNRT_CHECK(cnrtMemset(dptr, memset_val, size));
+#else
+    UNIMPLEMENTED();
+#endif  // WITH_CAMBRICON
+```
 
 63. oneflow/core/memory/memory_case.proto
+```.proto
+message FakeDevicePinnedMemory {
+  optional int64 reserved = 1;
+}
+
+
+message HostMemory {
+  oneof page_lock_case {
+    CudaPinnedMemory cuda_pinned_mem = 1;
+    FakeDevicePinnedMemory fake_dev_pinned_mem = 3;
+  }
+  
+  
+message DeviceCambriconMemory {
+  required int64 device_id = 1;
+}
+
+message FakeDeviceMemory {
+  optional int64 reserved = 1;
+}
+
+
+message MemoryCase {
+  oneof case {
+    HostMemory host_mem = 1;
+    DeviceCudaMemory device_cuda_mem = 2;
+    FakeDeviceMemory fake_dev_mem = 3;
+    DeviceCambriconMemory device_cambricon_mem = 4;
+  }
+}
+```
 
 64. oneflow/core/memory/memory_case_util.h
+```.h
+#ifndef ONEFLOW_CORE_MEMORY_MEMORY_CASE_UTIL_H_
+#define ONEFLOW_CORE_MEMORY_MEMORY_CASE_UTIL_H_
+
+#include "oneflow/core/common/util.h"
+#include "oneflow/core/common/id_util.h"
+#include "oneflow/core/memory/memory_case.pb.h"
+
+namespace oneflow {
+
+class MemCaseId {
+ public:
+  using device_index_t = MemZoneId::device_index_t;
+
+  explicit MemCaseId(const MemoryCase& mem_case);
+  explicit MemCaseId(const MemZoneId& mem_zone_id, DeviceType page_locked_device_type,
+                     bool registered_by_network)
+      : mem_zone_id_(mem_zone_id),
+        host_mem_page_locked_device_type_(page_locked_device_type),
+        host_mem_registered_by_network_(registered_by_network) {
+    if (mem_zone_id.device_type() != DeviceType::kCPU) {
+      CHECK_EQ(page_locked_device_type, DeviceType::kInvalidDevice);
+      CHECK_EQ(registered_by_network, false);
+    }
+  }
+  explicit MemCaseId(const MemZoneId& mem_zone_id, DeviceType page_locked_device_type)
+      : MemCaseId(mem_zone_id, page_locked_device_type, false) {}
+  explicit MemCaseId(const MemZoneId& mem_zone_id)
+      : MemCaseId(mem_zone_id, DeviceType::kInvalidDevice, false) {}
+  explicit MemCaseId(DeviceType device_type, device_index_t device_index,
+                     DeviceType page_locked_device_type, bool registered_by_network)
+      : MemCaseId(MemZoneId{device_type, device_index}, page_locked_device_type,
+                  registered_by_network) {}
+  explicit MemCaseId(DeviceType device_type, device_index_t device_index,
+                     DeviceType page_locked_device_type)
+      : MemCaseId(device_type, device_index, page_locked_device_type, false) {}
+  explicit MemCaseId(DeviceType device_type, device_index_t device_index)
+      : MemCaseId(device_type, device_index, DeviceType::kInvalidDevice, false) {}
+
+  const MemZoneId& mem_zone_id() const { return mem_zone_id_; }
+  DeviceType host_mem_page_locked_device_type() const { return host_mem_page_locked_device_type_; }
+  bool is_host_mem_registered_by_network() const { return host_mem_registered_by_network_; }
+  bool operator==(const MemCaseId& rhs) const {
+    return mem_zone_id_ == rhs.mem_zone_id_
+           && host_mem_page_locked_device_type_ == rhs.host_mem_page_locked_device_type_;
+  }
+  bool operator!=(const MemCaseId& rhs) const { return !((*this) == rhs); }
+
+ private:
+  MemZoneId mem_zone_id_;
+  DeviceType host_mem_page_locked_device_type_;
+  bool host_mem_registered_by_network_;
+};
+
+class GlobalMemCaseId {
+ public:
+  using rank_t = uint32_t;
+
+  explicit GlobalMemCaseId(rank_t rank, const MemCaseId& mem_case_id)
+      : rank_(rank), mem_case_id_(mem_case_id) {}
+  explicit GlobalMemCaseId(rank_t rank, const MemoryCase& mem_case)
+      : GlobalMemCaseId(rank, MemCaseId{mem_case}) {}
+
+  rank_t rank() const { return rank_; }
+  const MemCaseId& mem_case_id() const { return mem_case_id_; }
+  bool operator==(const GlobalMemCaseId& rhs) const {
+    return rank_ == rhs.rank_ && mem_case_id_ == rhs.mem_case_id_;
+  }
+  bool operator!=(const GlobalMemCaseId& rhs) const { return !((*this) == rhs); }
+
+ private:
+  rank_t rank_;
+  MemCaseId mem_case_id_;
+};
+
+inline bool operator==(const MemoryCase& lhs, const MemoryCase& rhs) {
+  return MemCaseId{lhs} == MemCaseId{rhs};
+}
+
+inline bool operator!=(const MemoryCase& lhs, const MemoryCase& rhs) {
+  return !(MemCaseId{lhs} == MemCaseId{rhs});
+}
+
+int64_t SerializeMemCaseIdToInt64(const MemCaseId& mem_case_id);
+void SerializeMemCaseIdToMemCase(const MemCaseId& mem_case_id, MemoryCase* mem_case);
+int64_t SerializeGlobalMemCaseIdToInt64(const GlobalMemCaseId& mem_case_id);
+
+bool PatchMemCaseId(MemCaseId* dst_mem_case_id, const MemCaseId& src_mem_case_id);
+bool PatchMemCase(MemoryCase* dst_mem_case, const MemoryCase& src_mem_case);
+MemCaseId GenerateCorrespondingPageLockedHostMemCaseId(const MemCaseId& mem_case_id);
+MemoryCase GenerateCorrespondingPageLockedHostMemoryCase(const MemoryCase& mem_case);
+
+}  // namespace oneflow
+
+#endif  // ONEFLOW_CORE_MEMORY_MEMORY_CASE_UTIL_H_
+
+```
+
 65. oneflow/core/memory/memory_case_util.cpp
+```.cpp
+#include "oneflow/core/memory/memory_case_util.h"
+
+namespace oneflow {
+
+namespace {
+
+// MemCaseId int64_t encode
+// |              | device_type | device_index  |                         |
+// |              | ---- 5 ---- | ----- 7 ----- |                         |
+// |              |         MemZoneId           |   pglck   | reg_by_net  |
+// |              | ----------- 12 ------------ | --- 5 --- | ---- 1 ---- |
+// |   reserved   |                       MemCaseId                       |
+// | ---- 46 ---- | ------------------------ 18 ------------------------- |
+// | ----------------------------- 64 bit ------------------------------- |
+
+// GlobalMemCaseId int64_t encode
+// |          |   rank   | MemCaseId  |
+// |          | -- 19 -- | --- 18 --- |
+// | reserved |    GlobalMemCaseId    |
+// | -- 27 -- | -------- 37 --------- |
+// | ------------ 64 bit ------------ |
+
+constexpr size_t kRegByNetBits = 1;
+constexpr size_t kPageLockedTypeBits = 5;
+constexpr size_t kDeviceIndexBits = MemZoneId::kDeviceIndexBits;
+constexpr size_t kDeviceTypeBits = MemZoneId::kDeviceTypeBits;
+
+constexpr size_t kPageLockedTypeShift = kRegByNetBits;
+constexpr size_t kDeviceIndexShift = kPageLockedTypeShift + kPageLockedTypeBits;
+constexpr size_t kDeviceTypeShift = kDeviceIndexShift + kDeviceIndexBits;
+constexpr size_t kRankShift = kDeviceTypeShift + kDeviceTypeBits;
+
+}  // namespace
+
+MemCaseId::MemCaseId(const MemoryCase& mem_case) {
+  // TODO: consider migrate to registry
+  DeviceType device_type = DeviceType::kInvalidDevice;
+  device_index_t device_index = 0;
+  DeviceType page_locked_device_type = DeviceType::kInvalidDevice;
+  bool host_mem_registered_by_network = false;
+  if (mem_case.has_host_mem()) {
+    device_type = DeviceType::kCPU;
+    if (mem_case.host_mem().has_cuda_pinned_mem()) {
+      page_locked_device_type = DeviceType::kGPU;
+      device_index = mem_case.host_mem().cuda_pinned_mem().device_id();
+    } else if (mem_case.host_mem().has_fake_dev_pinned_mem()) {
+      page_locked_device_type = DeviceType::kFAKEDEVICE;
+    } else {
+      // host mem is pageable
+    }
+    if (mem_case.host_mem().has_used_by_network() && mem_case.host_mem().used_by_network()) {
+      host_mem_registered_by_network = true;
+    }
+  } else if (mem_case.has_device_cuda_mem()) {
+    device_type = DeviceType::kGPU;
+    device_index = mem_case.device_cuda_mem().device_id();
+  } else if (mem_case.has_fake_dev_mem()) {
+    device_type = DeviceType::kFAKEDEVICE;
+  } else if (mem_case.has_device_cambricon_mem()) {
+    device_type = DeviceType::kCambricon;
+    device_index = mem_case.device_cambricon_mem().device_id();
+  } else {
+    // Uninitialized MemoryCase, all member are set to default
+  }
+  mem_zone_id_ = MemZoneId{device_type, device_index};
+  host_mem_page_locked_device_type_ = page_locked_device_type;
+  host_mem_registered_by_network_ = host_mem_registered_by_network;
+}
+
+int64_t SerializeMemCaseIdToInt64(const MemCaseId& mem_case_id) {
+  int64_t id = static_cast<int64_t>(mem_case_id.is_host_mem_registered_by_network());
+  id |= static_cast<int64_t>(mem_case_id.host_mem_page_locked_device_type())
+        << kPageLockedTypeShift;
+  id |= static_cast<int64_t>(mem_case_id.mem_zone_id().device_index()) << kDeviceIndexShift;
+  id |= static_cast<int64_t>(mem_case_id.mem_zone_id().device_type()) << kDeviceTypeShift;
+  return id;
+}
+
+int64_t SerializeGlobalMemCaseIdToInt64(const GlobalMemCaseId& global_mem_case_id) {
+  int64_t id = SerializeMemCaseIdToInt64(global_mem_case_id.mem_case_id());
+  id |= static_cast<int64_t>(global_mem_case_id.rank()) << kRankShift;
+  return id;
+}
+
+void SerializeMemCaseIdToMemCase(const MemCaseId& mem_case_id, MemoryCase* mem_case) {
+  // TODO: consider migrate to registry
+  if (mem_case_id.mem_zone_id().device_type() == DeviceType::kCPU) {
+    auto* host_mem = mem_case->mutable_host_mem();
+    if (mem_case_id.host_mem_page_locked_device_type() == DeviceType::kGPU) {
+      host_mem->mutable_cuda_pinned_mem()->set_device_id(mem_case_id.mem_zone_id().device_index());
+    } else if (mem_case_id.host_mem_page_locked_device_type() == DeviceType::kFAKEDEVICE) {
+      host_mem->mutable_fake_dev_pinned_mem();
+    } else {
+      host_mem->Clear();
+    }
+    if (mem_case_id.is_host_mem_registered_by_network()) { host_mem->set_used_by_network(true); }
+  } else if (mem_case_id.mem_zone_id().device_type() == DeviceType::kGPU) {
+    mem_case->mutable_device_cuda_mem()->set_device_id(mem_case_id.mem_zone_id().device_index());
+  } else if (mem_case_id.mem_zone_id().device_type() == DeviceType::kFAKEDEVICE) {
+    mem_case->mutable_fake_dev_mem();
+  } else if (mem_case_id.mem_zone_id().device_type() == DeviceType::kCambricon) {
+    mem_case->mutable_device_cambricon_mem()->set_device_id(
+        mem_case_id.mem_zone_id().device_index());
+  } else {
+    UNIMPLEMENTED();
+  }
+}
+
+// Patch the source memory case to destination memory case.
+// Patch failed when src_mem_case and dst_mem_case have different device_type
+// or one of them has invalid device_type.
+// Patch failed when src_mem_case and dst_mem_case have the same non-cpu device_type
+// but have different device_index.
+// When src_mem_case and dst_mem_case have the same cpu device_type
+// and src_mem_case has more constrain than dst_mem_case(page-locked by other device,
+// such as gpu or network device), patch the constrain of src_mem_case to dst_mem_case.
+bool PatchMemCaseId(MemCaseId* dst_mem_case_id, const MemCaseId& src_mem_case_id) {
+  DeviceType device_type = src_mem_case_id.mem_zone_id().device_type();
+  if (device_type == DeviceType::kInvalidDevice) { return false; }
+  if (device_type != dst_mem_case_id->mem_zone_id().device_type()) { return false; }
+
+  if (device_type == DeviceType::kCPU) {
+    MemCaseId::device_index_t device_index = dst_mem_case_id->mem_zone_id().device_index();
+    auto page_locked_device_type = dst_mem_case_id->host_mem_page_locked_device_type();
+    bool registered_by_network = dst_mem_case_id->is_host_mem_registered_by_network();
+    if (src_mem_case_id.host_mem_page_locked_device_type() == DeviceType::kGPU) {
+      page_locked_device_type = DeviceType::kGPU;
+      device_index = src_mem_case_id.mem_zone_id().device_index();
+    } else if (src_mem_case_id.host_mem_page_locked_device_type() == DeviceType::kFAKEDEVICE) {
+      page_locked_device_type = DeviceType::kFAKEDEVICE;
+    } else {
+      // do nothing
+    }
+    if (src_mem_case_id.is_host_mem_registered_by_network()) { registered_by_network = true; }
+    *dst_mem_case_id =
+        MemCaseId{device_type, device_index, page_locked_device_type, registered_by_network};
+  } else {
+    if (dst_mem_case_id->mem_zone_id().device_index()
+        != src_mem_case_id.mem_zone_id().device_index()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool PatchMemCase(MemoryCase* dst_mem_case, const MemoryCase& src_mem_case) {
+  MemCaseId src_mem_case_id{src_mem_case};
+  MemCaseId dst_mem_case_id{*dst_mem_case};
+  bool result = PatchMemCaseId(&dst_mem_case_id, src_mem_case_id);
+  SerializeMemCaseIdToMemCase(dst_mem_case_id, dst_mem_case);
+  return result;
+}
+
+MemCaseId GenerateCorrespondingPageLockedHostMemCaseId(const MemCaseId& mem_case_id) {
+  CHECK_NE(mem_case_id.mem_zone_id().device_type(), DeviceType::kInvalidDevice);
+  CHECK_NE(mem_case_id.mem_zone_id().device_type(), DeviceType::kCPU);
+  DeviceType page_locked_device_type = DeviceType::kInvalidDevice;
+  MemCaseId::device_index_t device_index = 0;
+  if (mem_case_id.mem_zone_id().device_type() == DeviceType::kGPU) {
+    page_locked_device_type = DeviceType::kGPU;
+    device_index = mem_case_id.mem_zone_id().device_index();
+  } else if (mem_case_id.mem_zone_id().device_type() == DeviceType::kFAKEDEVICE) {
+    page_locked_device_type = DeviceType::kFAKEDEVICE;
+  } else {
+    // do nothing
+  }
+  return MemCaseId{DeviceType::kCPU, device_index, page_locked_device_type};
+}
+
+MemoryCase GenerateCorrespondingPageLockedHostMemoryCase(const MemoryCase& mem_case) {
+  MemCaseId host_mem_case_id = GenerateCorrespondingPageLockedHostMemCaseId(MemCaseId{mem_case});
+  MemoryCase host_mem_case;
+  SerializeMemCaseIdToMemCase(host_mem_case_id, &host_mem_case);
+  return host_mem_case;
+}
+
+}  // namespace oneflow
+```
 
 66. oneflow/core/memory/memory_fake_dev_allocator.h
+```.h
+#ifndef ONEFLOW_CORE_MEMORY_MEMORY_FAKE_DEV_ALLOCATOR_H_
+#define ONEFLOW_CORE_MEMORY_MEMORY_FAKE_DEV_ALLOCATOR_H_
+#include "oneflow/core/common/util.h"
+#include "oneflow/core/memory/memory_case_util.h"
+
+namespace oneflow {
+
+struct FakeDevMemoryAllocatorImpl final {
+  static void* Allocate(MemoryCase& mem_case, size_t size);
+  static void Deallocate(void* ptr, MemoryCase mem_case);
+};
+}  // namespace oneflow
+
+#endif  // ONEFLOW_CORE_MEMORY_MEMORY_FAKE_DEV_ALLOCATOR_H_
+```
+
 67. oneflow/core/memory/memory_fake_dev_allocator.cpp
+```.cpp
+#include "oneflow/core/memory/memory_fake_dev_allocator.h"
+#include "oneflow/core/framework/device_register_fakedev.h"
+
+namespace oneflow {
+void* FakeDevMemoryAllocatorImpl::Allocate(MemoryCase& mem_case, size_t size) {
+  void* ptr = nullptr;
+  ptr = malloc(size + sizeof(FAKE_MAGIC_CODE));
+  memcpy(ptr, &FAKE_MAGIC_CODE, sizeof(FAKE_MAGIC_CODE));
+  CHECK_NOTNULL(ptr);
+  return static_cast<char*>(ptr) + 4;
+}
+
+void FakeDevMemoryAllocatorImpl::Deallocate(void* ptr, MemoryCase mem_case) {
+  free(static_cast<char*>(ptr) - 4);
+}
+}  // namespace oneflow
+
+```
 
 68. oneflow/core/register/register_manager.cpp
+```.cpp
+int64_t zone_id = SerializeMemCaseIdToInt64(MemCaseId{mem_block.mem_case()});
+```
 
 69. oneflow/core/register/runtime_register_desc.cpp
+```.cpp
+size_t RtRegstDesc::MainByteSize4OneRegst() const {
+  if (!mem_case_.has_host_mem()) {
+    return packed_blob_desc_->AlignedByteSizeOfBlobBody();
+  } else {
+    return packed_blob_desc_->AlignedTotalByteSize();
+	@@ -94,7 +94,7 @@ size_t RtRegstDesc::TotalSeparatedHeaderByteSize4AllRegst() const {
+}
 
-70. oneflow/core/thread/cambricon_device_thread.cpp
+size_t RtRegstDesc::SeparatedHeaderByteSize4OneRegst() const {
+  if (!mem_case_.has_host_mem()) {
+    return packed_blob_desc_->ByteSizeOfBlobHeader();
+  } else {
+    return 0;
+```
 
-71. oneflow/core/thread/cambricon_device_thread.h
+70. oneflow/core/thread/cambricon_device_thread.h
+```.h
+#ifndef ONEFLOW_CORE_THREAD_CAMBRICON_DEVICE_THREAD_H_
+#define ONEFLOW_CORE_THREAD_CAMBRICON_DEVICE_THREAD_H_
+
+#ifdef WITH_CAMBRICON
+#include "oneflow/core/thread/thread.h"
+
+namespace oneflow {
+
+class CambriconDeviceThread final : public Thread {
+ public:
+  OF_DISALLOW_COPY_AND_MOVE(CambriconDeviceThread);
+  CambriconDeviceThread() = delete;
+  ~CambriconDeviceThread();
+
+  CambriconDeviceThread(int64_t thrd_id, int64_t dev_id);
+
+ private:
+  Channel<CambriconCBNotifier> cb_notifier_chan_;
+  std::thread cb_notifier_poller_;
+};
+
+}  // namespace oneflow
+
+#endif  // WITH_CAMBRICON
+#endif  // ONEFLOW_CORE_THREAD_CAMBRICON_DEVICE_THREAD_H_
+
+```
+
+71. oneflow/core/thread/cambricon_device_thread.cpp
+```.cpp
+#ifdef WITH_CAMBRICON
+
+#include "oneflow/core/thread/cambricon_device_thread.h"
+#include "oneflow/core/thread/thread_manager.h"
+#include "oneflow/core/profiler/profiler.h"
+#include "oneflow/core/graph/id_serialization.h"
+#include "oneflow/core/device/mlu_util.h"
+
+namespace oneflow {
+
+CambriconDeviceThread::CambriconDeviceThread(int64_t thrd_id, int64_t dev_id) {
+  set_thrd_id(thrd_id);
+  mut_actor_thread() = std::thread([=]() {
+    MLUCurrentDeviceGuard guard(dev_id);
+    ThreadCtx thread_ctx;
+    thread_ctx.g_cambricon_queue.reset(new CambriconQueueHandle(&cb_notifier_chan_));
+    thread_ctx.cb_notifier_chan = &cb_notifier_chan_;
+    PollMsgChannel(thread_ctx);
+  });
+
+  cb_notifier_poller_ = std::thread([=]() {
+    MLUCurrentDeviceGuard guard(dev_id);
+    CambriconCBNotifier cb_notifier;
+    while (cb_notifier_chan_.Receive(&cb_notifier) == kChannelStatusSuccess) {
+      CNRT_CHECK(cnrtWaitNotifier(cb_notifier.notifier));
+      cb_notifier.callback();
+      CNRT_CHECK(cnrtDestroyNotifier(&cb_notifier.notifier));
+    }
+  });
+}
+
+CambriconDeviceThread::~CambriconDeviceThread() {
+  cb_notifier_chan_.Close();
+  cb_notifier_poller_.join();
+}
+
+REGISTER_DEVICE_THREAD_CREATOR_WITH_STREAM_ID(
+    DeviceType::kCambricon, ([](const StreamId& stream_id) -> Thread* {
+      int64_t thrd_id = SerializeStreamIdToInt64(stream_id);
+      int64_t dev_id = static_cast<int64_t>(stream_id.device_id().device_index());
+      return new CambriconDeviceThread(thrd_id, dev_id);
+    }));
+
+}  // namespace oneflow
+
+#endif  // WITH_CAMBRICON
+```
 
 72. oneflow/core/thread/fake_device_thread.h
+```.h
+#ifndef ONEFLOW_CORE_THREAD_FAKE_DEVICE_THREAD_H_
+#define ONEFLOW_CORE_THREAD_FAKE_DEVICE_THREAD_H_
+
+#include "oneflow/core/thread/thread.h"
+
+namespace oneflow {
+
+class FakeDeviceThread final : public Thread {
+ public:
+  OF_DISALLOW_COPY_AND_MOVE(FakeDeviceThread);
+  FakeDeviceThread() = delete;
+  ~FakeDeviceThread() = default;
+
+  FakeDeviceThread(int64_t thrd_id);
+
+ private:
+};
+
+}  // namespace oneflow
+
+#endif  // ONEFLOW_CORE_THREAD_FAKE_DEVICE_THREAD_H_
+```
+
 73. oneflow/core/thread/fake_device_thread.cpp
+```.cpp
+#include "oneflow/core/thread/fake_device_thread.h"
+#include "oneflow/core/thread/thread_manager.h"
+#include "oneflow/core/profiler/profiler.h"
+#include "oneflow/core/graph/id_serialization.h"
+
+namespace oneflow {
+
+FakeDeviceThread::FakeDeviceThread(int64_t thrd_id) {
+  set_thrd_id(thrd_id);
+  mut_actor_thread() = std::thread([this, thrd_id]() {
+    OF_PROFILER_NAME_THIS_HOST_THREAD("Fake Device Actor : (" + std::to_string(thrd_id) + ")");
+    ThreadCtx ctx;
+#ifdef WITH_CUDA
+    ctx.cb_event_chan = nullptr;
+#endif  // WITH_CUDA
+    PollMsgChannel(ctx);
+  });
+}
+
+REGISTER_DEVICE_THREAD_CREATOR_WITH_STREAM_ID(DeviceType::kFAKEDEVICE,
+                                              ([](const StreamId& stream_id) -> Thread* {
+                                                return new FakeDeviceThread(
+                                                    SerializeStreamIdToInt64(stream_id));
+                                              }));
+
+}  // namespace oneflow
+```
 
 74. oneflow/core/thread/thread_context.h
+```.h
+#include "oneflow/core/device/cambricon_queue_handle.h"
+
+
+#ifdef WITH_CAMBRICON
+  std::unique_ptr<CambriconQueueHandle> g_cambricon_queue;
+  Channel<CambriconCBNotifier>* cb_notifier_chan;
+#endif
+```
 
 75. oneflow/core/thread/thread_manager.cpp
-
+```.cpp
+#include "oneflow/core/thread/fake_device_thread.h"
+```
 
 
 
