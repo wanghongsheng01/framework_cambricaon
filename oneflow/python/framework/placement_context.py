@@ -120,5 +120,12 @@ def GetCpuMachineDeviceIds(resource):
         for m_id in range(resource.machine_num)
     ]
 
+def GetMluMachineDeviceIds(resource):
+    assert resource.machine_num > 0
+    assert resource.HasField("mlu_device_num")
+    return [
+        "{}:0-{}".format(m_id, resource.mlu_device_num - 1)
+        for m_id in range(resource.machine_num)
+    ]
 
 _parallel_conf_str2ofrecord = {}

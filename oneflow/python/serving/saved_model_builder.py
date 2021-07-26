@@ -133,7 +133,10 @@ class ModelBuilder(object):
         self.proto.version = self.version_
 
         checkpoint_path = os.path.join(version_dir, self.checkpoint_dir_)
-        flow.checkpoint.save(checkpoint_path)
+        # flow.checkpoint.save(checkpoint_path)
+        # using old api to save checkpoint for temporarily because eager api don't support new device type
+        check_point = flow.train.CheckPoint()
+        check_point.save(checkpoint_path)
         self.proto.checkpoint_dir = self.checkpoint_dir_
 
         saved_model_pb_path = os.path.join(version_dir, self.saved_model_pb_filename_)

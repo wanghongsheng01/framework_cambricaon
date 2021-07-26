@@ -22,13 +22,12 @@ import enum
 import google.protobuf.text_format as text_format
 
 import oneflow as flow
-import oneflow._oneflow_internal
-import oneflow._oneflow_internal.oneflow.core.job.job_conf as job_conf_proto_cfg
+import oneflow_api
+import oneflow_api.oneflow.core.job.job_conf as job_conf_proto_cfg
 
-import oneflow._oneflow_internal.oneflow.core.operator.interface_blob_conf as interface_blob_conf_proto_cfg
-import oneflow._oneflow_internal.oneflow.core.common.shape as shape_proto_cfg
-import oneflow._oneflow_internal.oneflow.core.common.data_type as dtype_proto_cfg
-import oneflow._oneflow_internal.oneflow.core.job.sbp_parallel as sbp_parallel_cfg
+import oneflow_api.oneflow.core.operator.interface_blob_conf as interface_blob_conf_proto_cfg
+import oneflow_api.oneflow.core.common.shape as shape_proto_cfg
+import oneflow_api.oneflow.core.common.data_type as dtype_proto_cfg
 import oneflow.core.job.job_conf_pb2 as job_conf_proto
 import oneflow.core.operator.interface_blob_conf_pb2 as interface_blob_conf_proto
 import oneflow.core.serving.saved_model_pb2 as saved_model_pb
@@ -107,17 +106,10 @@ def _inferface_blob_conf_proto_to_cfg(
     dtype = dtype_proto_cfg.DataType(int(inferface_blob_conf_proto.data_type))
     mut_inferface_blob_conf_cfg.set_data_type(dtype)
 
-    if inferface_blob_conf_proto.HasField("parallel_distribution"):
-        # TODO(guoran): Process Nd sbp, parallel_distribution_cfg CopyFrom parallel_distribution_proto
-        assert len(inferface_blob_conf_proto.parallel_distribution.sbp_parallel) == 1
-        sbp_proto = inferface_blob_conf_proto.parallel_distribution.sbp_parallel[0]
-        if sbp_proto.HasField("split_parallel"):
-            split_axis = sbp_proto.split_parallel.axis
-            sbp = sbp_parallel_cfg.SbpParallel()
-            sbp.mutable_split_parallel().set_axis(split_axis)
-            mut_inferface_blob_conf_cfg.mutable_parallel_distribution().mutable_sbp_parallel().Add().CopyFrom(
-                sbp
-            )
+    split_axis = dtype_proto_cfg.OptInt64()
+    if inferface_blob_conf_proto.split_axis.HasField("value"):
+        split_axis.set_value(inferface_blob_conf_proto.split_axis.value)
+    mut_inferface_blob_conf_cfg.mutable_split_axis().CopyFrom(split_axis)
 
     mut_inferface_blob_conf_cfg.set_is_dynamic(inferface_blob_conf_proto.is_dynamic)
 
@@ -175,11 +167,11 @@ class InferenceSession(object):
 
     def init(self):
         # env init
-        if not oneflow._oneflow_internal.IsEnvInited():
+        if not oneflow_api.IsEnvInited():
             flow.env.init()
 
         # session init
-        if not oneflow._oneflow_internal.IsSessionInited():
+        if not oneflow_api.IsSessionInited():
             self._make_config_proto()
             session_util._TryCompleteConfigProto(self.config_proto_)
             c_api_util.InitLazyGlobalSession(self.config_proto_)
@@ -191,10 +183,10 @@ class InferenceSession(object):
         self.event_loop_.close()
 
         if self.status_ == self.SessionStatus.RUNNING:
-            oneflow._oneflow_internal.StopLazyGlobalSession()
-            oneflow._oneflow_internal.DestroyLazyGlobalSession()
+            oneflow_api.StopLazyGlobalSession()
+            oneflow_api.DestroyLazyGlobalSession()
         elif self.status_ == self.SessionStatus.OPEN:
-            oneflow._oneflow_internal.DestroyLazyGlobalSession()
+            oneflow_api.DestroyLazyGlobalSession()
         else:
             pass
 
@@ -219,12 +211,16 @@ class InferenceSession(object):
     def _make_config_proto(self):
         if self.config_proto_ is None:
             self.config_proto_ = session_util._GetDefaultConfigProto()
+            self.config_proto_.resource.ClearField("cpu_device_num")
+            self.config_proto_.resource.ClearField("gpu_device_num")
+            self.config_proto_.resource.ClearField("mlu_device_num")
 
-        if self.option_.device_tag == "gpu":
-            self.config_proto_.resource.gpu_device_num = self.option_.device_num
-        elif self.option_.device_tag == "cpu":
+        if self.option_.device_tag == "cpu":
             self.config_proto_.resource.cpu_device_num = self.option_.device_num
-            self.config_proto_.resource.gpu_device_num = 0
+        elif self.option_.device_tag == "gpu":
+            self.config_proto_.resource.gpu_device_num = self.option_.device_num
+        elif self.option_.device_tag == "cambricon":
+            self.config_proto_.resource.mlu_device_num = self.option_.device_num
         else:
             raise NotImplementedError(
                 "not supported device tag {}".format(self.option_.device_tag)
@@ -254,7 +250,6 @@ class InferenceSession(object):
         else:
             job_conf = job_conf_proto_cfg.JobConfigProto()
             job_conf.set_job_name(job_name)
-            job_conf.mutable_predict_conf()
             self.job_name2job_conf_[job_name] = job_conf
             return job_conf
 
@@ -285,7 +280,7 @@ class InferenceSession(object):
                 yield self
                 self.cur_job_name_ = None
 
-        oneflow._oneflow_internal.JobBuildAndInferCtx_Close()
+        oneflow_api.JobBuildAndInferCtx_Close()
 
     def compile(self, op_list):
         self._check_status(self.SessionStatus.OPEN)
@@ -300,15 +295,16 @@ class InferenceSession(object):
                         op_conf.name, op_conf.device_tag, device_tag
                     )
                 )
+                op_conf.device_tag = device_tag
 
             compile_ctx.CurJobAddOp(op_conf)
 
-        oneflow._oneflow_internal.CurJobBuildAndInferCtx_Complete()
-        oneflow._oneflow_internal.CurJobBuildAndInferCtx_Rebuild()
+        oneflow_api.CurJobBuildAndInferCtx_Complete()
+        oneflow_api.CurJobBuildAndInferCtx_Rebuild()
 
     def launch(self):
         self._check_status(self.SessionStatus.OPEN)
-        oneflow._oneflow_internal.StartLazyGlobalSession()
+        oneflow_api.StartLazyGlobalSession()
         self.inter_user_job_info_ = c_api_util.GetInterUserJobInfo()
         self._run_load_checkpoint_job()
         self.status_ = self.SessionStatus.RUNNING
@@ -434,9 +430,7 @@ class InferenceSession(object):
         if job_name is None:
             raise ValueError("please specify job_name")
 
-        lbn = oneflow._oneflow_internal.JobBuildAndInferCtx_GetOpBlobLbn(
-            job_name, op_name, blob_name
-        )
+        lbn = oneflow_api.JobBuildAndInferCtx_GetOpBlobLbn(job_name, op_name, blob_name)
         shape = c_api_util.JobBuildAndInferCtx_GetStaticShape(job_name, lbn)
         dtype = c_api_util.JobBuildAndInferCtx_GetDataType(job_name, lbn)
         dtype = dtype_util.convert_proto_dtype_to_oneflow_dtype(dtype)
@@ -464,7 +458,7 @@ class InferenceSession(object):
             self.event_loop_.call_soon_threadsafe(future.set_result, None)
 
         job_inst.AddPostFinishCallback(job_finish_cb)
-        oneflow._oneflow_internal.LaunchJob(job_inst)
+        oneflow_api.LaunchJob(job_inst)
         self.job_futures_.append(future)
 
     def _run_push_jobs(self, **kwargs):
@@ -502,7 +496,7 @@ class InferenceSession(object):
         return output_futures
 
     def _make_pull_job_cb(self, output_name, user_job_name, future):
-        output_lbn = oneflow._oneflow_internal.JobBuildAndInferCtx_GetOpBlobLbn(
+        output_lbn = oneflow_api.JobBuildAndInferCtx_GetOpBlobLbn(
             user_job_name, output_name, "out"
         )
         split_axis = c_api_util.JobBuildAndInferCtx_GetSplitAxisFromProducerView(

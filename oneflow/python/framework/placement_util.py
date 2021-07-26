@@ -138,5 +138,7 @@ def GetDefaultMachineDeviceIds(resource):
         return "gpu", placement_ctx.GetGpuMachineDeviceIds(resource)
     elif resource.HasField("cpu_device_num"):
         return "cpu", placement_ctx.GetCpuMachineDeviceIds(resource)
+    elif resource.HasField("mlu_device_num"):
+        return "cambricon", placement_ctx.GetMluMachineDeviceIds(resource)
     else:
         raise NotImplementedError
