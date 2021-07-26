@@ -5125,6 +5125,9 @@ def mse_loss(input):
 ```
 
 
+
+## [MLU270 算子库移植代码](https://github.com/wanghongsheng01/framework_cambricaon/tree/master/oneflow_cambricon-cambricon/oneflow/python/test/ops/)
+
 105. oneflow/python/test/ops/_test_add_n_cambricon.py
 
 106. oneflow/python/test/ops/_test_bias_add_cambricon.py
@@ -5250,6 +5253,9 @@ def mse_loss(input):
 181.  oneflow/python/test/ops/test_util.py
 182.  oneflow/python/test/ops/test_watch_diff.py
 
+
+
+## [MLU270 算子库 kernel 移植代码](https://github.com/wanghongsheng01/framework_cambricaon/tree/master/oneflow_cambricon-cambricon/oneflow/user/kernels)
 
 183.  oneflow/user/kernels/add_n_kernel_mlu.cpp
 184.  oneflow/user/kernels/bias_add_mlu_kernel.cpp
